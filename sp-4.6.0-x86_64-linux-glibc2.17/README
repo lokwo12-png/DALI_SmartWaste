@@ -1,0 +1,30 @@
+
+		    SICStus Prolog binary distribution
+		===========================================
+
+Prerequisites:
+  You need to have perl installed and available in your PATH. Perl can
+  be obtained (for free) from http://www.cpan.org/
+
+To install SICStus Prolog, type
+
+% ./InstallSICStus
+
+and follow the instructions on the screen. When installation is complete,
+you can access the documentation locally by opening
+
+	      file:/<install-dir>/lib/sicstus-<ver>/doc/html/
+
+Where <install-dir> is the installation directory you specified during
+installation and <ver> is the SICStus version (e.g. 4.6.0).
+
+For further information, updates, patches, and online documentation, please
+visit the SICStus Prolog website at
+
+			https://sicstus.sics.se/
+
+Report bugs etc. using
+
+	    https://sicstus.sics.se/bugreport.html
+      
+/SICStus Support

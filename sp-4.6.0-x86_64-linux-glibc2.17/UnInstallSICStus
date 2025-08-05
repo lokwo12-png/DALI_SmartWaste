@@ -1,0 +1,10 @@
+#! /bin/sh
+# *** This script is automatically generated! ***
+# (this script does not yet remove everything it should)
+# File: UnInstallSICStus
+# 
+# Remove a SICStus installation. 
+#
+# Installation directory: /denis_user/local/sicstus4.6.0
+# Installation started on: Tue Aug  5 05:54:32 CEST 2025
+echo "Removing SICStus Prolog 4.6.0 installation from /denis_user/local/sicstus4.6.0..."

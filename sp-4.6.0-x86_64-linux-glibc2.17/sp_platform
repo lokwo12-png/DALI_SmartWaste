@@ -1,0 +1,260 @@
+#! /bin/sh -f
+
+UNAME_S=`uname -s`
+UNAME_R=`uname -r`
+
+opt_32='no'
+opt_64='no'
+DUMMY_FILE_BASE=''
+while [ $# -gt  0 ]; do
+    opt="$1"
+    shift
+    case "${opt}" in
+      --32)
+        opt_32=yes
+      ;;
+      --64)
+        opt_64=yes
+      ;;
+      *)                        # SICStus Installer Tool uses this
+        DUMMY_FILE_BASE="${opt}"
+      ;;
+    esac
+done
+# suffix uname -m with bit_marker64 if 32-bit is the default for this platform
+if [ ${opt_64:-no} = yes ]; then
+  bit_marker64='64'
+else
+  bit_marker64=''
+fi
+# suffix uname -m with bit_marker32 if 64-bit is the default for this platform
+if [ ${opt_32:-no} = yes ]; then
+  bit_marker32='32'
+else
+  bit_marker32=''
+fi
+
+def_platform=`uname -m`-$UNAME_S
+
+# Determine operating system
+case $UNAME_S in
+
+    SunOS)
+	case $UNAME_R in
+	    4.*)
+		PLATFORM=`uname -m`${bit_marker64}-sunos-$UNAME_R
+		;;
+	    5.*)
+	        # [PD] 4.0.0beta3+ New name for 64-bit OS on i386.
+	        UNAME_P=`uname -p`
+		case $UNAME_P in
+		    i386)
+		    if [ ${opt_64:-no} = yes ]; then
+			PLATFORM=amd64-solaris-$UNAME_R
+		    else
+			PLATFORM=${UNAME_P}-solaris-$UNAME_R
+		    fi
+		    ;;
+		    sparc)
+		    PLATFORM=${UNAME_P}${bit_marker64}-solaris-$UNAME_R
+		    ;;
+		esac
+		;;
+	    *)
+		echo "Unknown platform $def_platform."
+		;;
+        esac
+	;;
+
+    AIX)
+	PLATFORM=rs6000${bit_marker64}-aix-`uname -v`.$UNAME_R
+	;;
+    
+    Linux)
+
+	case `uname -m` in
+	    *86_64)
+              if [ ${opt_32:-no} = yes ]; then
+                PLATFORM=x86-linux
+              else
+                PLATFORM=x86_64-linux
+              fi
+              ;;
+	    *86) PLATFORM=x86-linux ;;
+
+            # [PM] 3.12.0 FIXME: bit_marker?? for the following:
+	    sparc) PLATFORM=sparc-linux ;;
+
+            ppc64le)
+		 # [PM] 4.3.2+ Little Endian PowerPC, e.g. RH 7.1.
+                 # 64-bit is the default
+                 if [ ${opt_32:-no} = yes ]; then
+                   PLATFORM=powerpcle6432-linux
+                 else
+                   PLATFORM=powerpcle64-linux
+                 fi
+                 ;;
+
+	    ppc) PLATFORM=powerpc-linux ;;
+	    ppc64)
+                 # [PM] 3.12.1+ IBM Red-Hat Linux on Power has ppc64 but the gcc et al defaults to 32-bit
+                 #
+
+                 #              The strange naming is because we do not want a machine name that ends in
+                 #              64 when the executables are 32-bit. An alternative would be powerpc6464
+                 #              and powerpc6432.
+
+                 #              Someday we may want to have 32-bit executables that uses 64-bit
+                 #              instructions for speed (same for x86_64) this would require some new
+                 #              sp_platform naming scheme.
+                 if [ ${opt_64:-no} = yes ]; then
+                   PLATFORM=powerpc64-linux
+                 else
+                   PLATFORM=powerpc6432-linux
+                 fi
+                 ;;
+            s390) PLATFORM=s390-linux ;;
+            s390x) PLATFORM=s390x-linux ;;
+	esac
+        libc_version_string='' # [PM] 4.2 do not inherit from environment
+        # [PM] 4.2 Avoid using the C compiler, if possible
+        if [ "${libc_version_string:-empty}" = "empty" ]; then
+           # NOTE: This is sometimes X.Y.Z (e.g. 2.3.2) and sometimes just X.Y (2.7)
+           gnu_libc_version=`getconf GNU_LIBC_VERSION` 2>/dev/null
+           gnu_libc_version_major=`echo "${gnu_libc_version}" | sed -n -e 's/glibc[ ][ ]*\([0-9][0-9]*\).*/\1/p'`
+           gnu_libc_version_minor=`echo "${gnu_libc_version}" | sed -n -e 's/glibc[ ][ ]*\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\2/p'`
+           : ${gnu_libc_version_minor:=0} # default to zero
+
+           # gnu_libc_version_rev=`echo "${gnu_libc_version}" | sed -n -e 's/glibc[ ][ ]*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\3/p'`
+           : ${gnu_libc_version_rev:=0} # default to zero
+           if [ -n "${gnu_libc_version_major}" ]; then
+             libc_version_string="glibc${gnu_libc_version_major}.${gnu_libc_version_minor}"
+           fi
+        fi                      # libc_version_string is empty
+
+        # [PM] 4.2 fall back to using C compiler
+        if [ "${libc_version_string:-empty}" = "empty" ]; then
+          # [PM] 4.2 do not create temp-dir unless we need it
+          if [ -z "${DUMMY_FILE_BASE}" ]; then
+              # [PM] 3.11.3 create the tmp files somewhere we have write permissions
+              if DUMMY_DIR=`mktemp -d 2> /dev/null`; then
+                :
+              elif DUMMY_DIR=${TMPDIR:-/tmp} && [ -d "${DUMMY_DIR}" ]; then
+                :
+              else
+                DUMMY_DIR=.               # fallback, may not have write permissions here
+              fi
+              DUMMY_PATH="${DUMMY_DIR}/"
+              # [PD] 2003-10-30 merge with PMs unique name-hack (see comment below)
+              DUMMY_FILE_BASE=dummy_$$_`date '+%Y%m%d_%H%M%S'`
+          else
+              DUMMY_PATH=''
+          fi
+
+          DUMMY_SOURCE=${DUMMY_PATH}${DUMMY_FILE_BASE}.c
+          DUMMY_EXECUTABLE=${DUMMY_PATH}${DUMMY_FILE_BASE}
+
+          # [PM] 3.11.3 ensure the temp-files are deleted on abnormal (and normal) exit
+          trap "rm -rf ${DUMMY_SOURCE} ${DUMMY_EXECUTABLE}" EXIT
+          # Determine libc version
+          cat >$DUMMY_SOURCE <<EOF
+#include <stdio.h>
+#include <features.h>
+int main() {
+#ifdef __GLIBC__
+#if __GLIBC_MINOR__ == 0
+    printf("glibc%d",__GLIBC__);
+#else
+    printf("glibc%d.%d",__GLIBC__,__GLIBC_MINOR__);
+#endif
+    return 0;
+#elif __GNU_LIBRARY__
+    printf("libc-%d",__GNU_LIBRARY__);
+    return 0;
+#else
+    /* [PM] 4.2 let script decide on default value
+            printf("unknown"); */
+    return 1;
+#endif
+}
+EOF
+          ${CC-cc} $DUMMY_SOURCE -o $DUMMY_EXECUTABLE && libc_version_string=`$DUMMY_EXECUTABLE` 2>/dev/null
+        fi                      # libc_version_string is empty
+
+        # [PM] 4.2 set to unknown if still empty
+        : ${libc_version_string:=unknown}
+
+
+        PLATFORM=${PLATFORM}-$libc_version_string
+	;;
+
+    FreeBSD)
+	if uname -r | egrep -e '-RELEASE' >/dev/null 2>&1; then
+	    uname_r=`echo $UNAME_R | sed -e 's/^\(.*\)-RELEASE$/\1/g'`
+	else
+	    uname_r=$UNAME_R
+	fi
+	case `uname -m` in
+	    *86) PLATFORM=x86-freebsd-$uname_r ;;
+	esac
+	;;
+
+    NetBSD)
+	case `uname -m` in
+	    *86) PLATFORM=x86-netbsd ;;
+	esac
+	;;
+
+    OpenBSD)
+	case `uname -m` in
+	    *86) PLATFORM=x86-openbsd ;;
+	esac
+	;;
+
+    CYGWIN_NT*|Windows*)
+
+        # [PM] 3.11.3 no need to invoke C compiler, we do not care
+        # about what Windows (NT) version we are running on.
+        PLATFORM=x86-win32-nt-4
+	;;
+
+    BSD/OS)
+	case `uname -m` in
+	    *86) PLATFORM=x86-bsdi-$UNAME_R ;;
+	esac
+	;;
+
+    Darwin)
+        # [PM] 4.1.3+ SPRM 11968, recent Macs report `uname -m`=x86_64, so we use uname -p, like config.guess
+        UNAME_PROCESSOR=`uname -p` || UNAME_PROCESSOR=unknown
+        case $UNAME_PROCESSOR in
+            *86*)
+                if [ ${opt_64:-no} = yes ]; then
+                    PLATFORM=x86_64-darwin-$UNAME_R
+                else
+                    PLATFORM=i386-darwin-$UNAME_R
+                fi
+            ;;
+            unknown)
+                PLATFORM=powerpc${bit_marker64}-darwin-$UNAME_R
+            ;;
+        esac
+	;;
+
+    Rhapsody)
+	case `uname -m` in
+	    Power*) PLATFORM=powerpc-rhapsody-$UNAME_R ;;
+	esac
+	;;
+esac
+
+if [ -n "${PLATFORM}" ]; then
+    echo "${PLATFORM}"
+    exit 0
+else
+    echo "Unknown host type $def_platform"
+    exit 1
+fi
+
+
+

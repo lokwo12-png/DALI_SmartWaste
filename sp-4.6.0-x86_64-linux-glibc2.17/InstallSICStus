@@ -1,0 +1,3016 @@
+#! /bin/sh
+############################################################
+#
+# SICStus Prolog Installer script
+#
+# Copyright (C) 2019, RISE Research Institutes of Sweden AB.
+#
+############################################################
+
+if [ "x$1" = x"--debug" ] || [ "x$INSTALLSICSTUS_DEBUG" = "xyes" ]; then
+  set -x
+fi
+
+
+now=`date`
+
+# [PD] 4.0.0 Moved here since it is now used early.
+spver=4.6.0
+
+SP_DIRNAME='sicstus-4.6.0'
+SP_RTSYS_DIRNAME='sp-4.6.0'
+# [PM] 3.9b5 Renamed from PLATFORM, see configure.in
+BUILD_PLATFORM='x86_64-linux-glibc2.17'
+ENCRYPTED_INSTALLER='no'
+
+# [PM] 3.10 yes if the doc directory is at the top-level instead of
+# being hidden in sicstus.tar
+SP_BINDIST_TOP_LEVEL_DOC=yes
+PERSISTENT_CONFIGURE_OPTIONS=" --enable-64bit --enable-jit --with-bdbversion=5.3.21" # e.g., --enable-64bit
+
+# [PM] 4.0.5
+enable_encrypted_spre="no"
+
+# [PM] 4.0.5
+distribute_spre="yes"
+
+
+# [PM] 3.10
+# tarball_encrypted=@MKDISTR_COMPRESS_AND_CRYPT@
+tarball_encrypted=yes
+
+# [PD] 3.10.2
+USE_PAX=no
+
+# [PM] FIXME: these should come from the locally run configure
+SP_INSTALL_DECRYPT=./spdecrypt
+SP_INSTALL_ZCAT=zcat
+
+
+### Special platform types
+case $BUILD_PLATFORM in
+   *darwin-*)
+      sp_darwin=yes
+      ;;
+   *)
+      ;;
+esac
+: ${sp_darwin:=no}
+
+
+### Configuration stuff
+# [PD] 3.10.2 TAR is gone. STDTAR is configured in distrib.in
+# TAR=tar
+PAX=pax
+# MKDIR=./ensdir
+# [PM] 3.10.2 must be absolute path
+ENSDIR="`pwd`/ensdir"
+CP=cp
+# [PD] 4.0.0 How to run configure with a standard shell.
+case "${BUILD_PLATFORM}" in
+    *-solaris-*)
+        : ${POSIX_SHELL='/usr/xpg4/bin/sh'}
+        # The sparc solaris version of 'command' is broken.
+        # [PD] 3.12.8 'command' is broken on i386 solaris, too.
+        # [PM] 4.0.5 The new configure script (autoconf 2.63) seems to
+        # be more likely to switch to some other shell if CONFIG_SHELL
+        # is not set. (I assume this is what happened since this "used
+        # to work" without setting CONFIG_SHELL)
+        config_shell=${POSIX_SHELL}
+        CONFIGURE="env CONFIG_SHELL=$config_shell $config_shell ./configure"
+    ;;
+    *)
+        if test -z "${POSIX_SHELL}"; then
+           if posix_shell=`command -p command -p -v sh` 2>/dev/null; then
+               : ${POSIX_SHELL:="${posix_shell}"}
+           fi
+           : ${POSIX_SHELL:=sh}
+        fi
+    ;;
+esac
+
+case "${POSIX_SHELL}" in
+     /*) # absolute
+	CONFIGURE="env CONFIG_SHELL=${POSIX_SHELL} ${POSIX_SHELL} ./configure"
+     ;;
+     *)
+        # [PM] 4.0.5 Cannot set CONFIG_SHELL here since it must be an absolute path
+	CONFIGURE="${POSIX_SHELL} ./configure"
+     ;;
+esac
+
+
+# [PM] 3.10.1 (SUSv2/POSIX) a+X ensures that all directories are
+# searchable for all and that all executable files gets the execute
+# bit set for all (*).  (*) assuming the execute bit is already set
+# for some of ugo, which it will be for owner unless umask is set to
+# mask also owner bits. If umask masks either of rwx for owner then we
+# are toast anyway.
+defmode=u+rw,go+r,a+X
+defdirmode=$defmode
+
+devel=yes
+if [ $devel = yes ]; then
+    timecmd=time
+else
+    timecmd=""
+fi
+
+### Files used during installation
+configure_warnings="`pwd`/configure_warnings.txt"
+configure_errors="`pwd`/configure_errors.txt"
+errorlog="`pwd`/install-errors.log"
+install_log="`pwd`/install.log"
+cachefile="`pwd`/install.cache"
+filelist=files.lst
+filechklist=filechk.lst
+featurefile=features
+# [PD] 3.10.2 The name 'tarball' is not a good name when using pax, but keep
+#      the name instead of changing many places in this file.
+if [ "x$USE_PAX" = "xyes" ]; then
+    tarball=sicstus.pax
+else
+    tarball=sicstus.tar
+fi
+uninstall_script="`pwd`/UnInstallSICStus"
+uninstall_dirfile="`pwd`/installdirs.tmp"
+installdir_created=no
+
+rm -f "$errorlog"
+rm -f "$install_log"
+rm -f "$uninstall_dirfile"
+touch "$install_log" "$errorlog" "$uninstall_dirfile"
+
+# Check Jasper and Tcl/Tk availability
+
+# [PM] 4.1.3  Read in the featurefile to check for which third-party modules we support (Tcl/Tk, BDB, ...)
+#             The featurefile defines the variables 'has_java_jni',
+#             'has_tcltk', 'has_bdb', and 'has_odbc' which are used in this script.
+. "./$featurefile"
+# [PM] 4.5.0 The value from the feature file. "$prebuilt" is used, changed, and cached, below, so we need the original value too.
+feature_prebuilt=${prebuilt:-no}
+
+# [PM] 4.4.1 Encryption is no longer used for installers. SPRM-20098.
+if [ "x${ENCRYPTED_INSTALLER}" = "xyes" ]; then
+   tarball_or_encrypted_tarball=${tarball}.compress.crypt
+else
+   tarball_or_encrypted_tarball=${tarball}.compress
+fi
+
+# Files included in the distribution; these are checked in
+# the integrity test.
+# [PM] 3.9.1b4 SP_EXPFILE is gone
+# [PM] 3.9 replaced sprt.exp with SP_EXPFILE since it does not exist on all platforms.
+# [PM] 3.8.5 SPRM 1707 added sprt.exp
+distrfiles="$filelist $filechklist $tarball_or_encrypted_tarball configure configure.in ensdir \
+	spld.config.in spld.pl.in splfr.pl.in splm.in Common.in"
+# [PM] 4.1.3+ real-ld is gone
+# distrfiles="${distrfiles} read-ld.in"
+
+### Parameters used during installations, and their defaults
+### [PM] All variables saved with cache_value should get an explicit default here
+#
+# Installation directory
+# [PM] 4.2 from configure.
+installdir=/usr/local/sicstus4.6.0
+# [PD] 4.0.0 Change to version specific installation directory
+#installdir=/usr/local
+# installdir=/usr/local/sicstus${spver}
+
+icheck_ok=no
+ignore_icheck_result=no
+overwrite_install=overwrite
+# [PM] 3.9.1 MacOS X install double-clickable script in /Applications
+clickscript=no
+
+# [PM] 3.11.3 SPRM 8328 these are now cached
+install_tcltk=yes
+install_bdb=yes
+install_jasper=yes
+
+# [PD] 4.0.0beta1 cache the value of a Java installation for Prologbeans
+locate_java=yes			# Always do this in a batch install
+
+# [PD] 4.0.3beta1 This is sometimes cached
+# [PM] 4.2 empty means default or cached value
+ignore_wrong_glibc_version=''
+
+# [PM] 4.2 sometimes cached
+ignore_glibc_version_mismatch=no
+
+
+opt_nolicense=no
+opt_verbose=no
+
+opt_batch=no
+# [PM] 3.8.6 suppress some questions that most do not want (such as Tcl/Tk version)
+opt_all_questions=no
+# [PM] 3.8.6
+opt_help=no
+# [PD] 3.9.1 indicates that we were called from SICStusInstaller
+opt_called_by_GUI=no
+# [PD] 3.9.1 make it possible to skip questions about the installation of
+#      library(tcltk), Jasper and library(bdb) in batch mode.
+#      The option `--without-<foo>' will change the default answer to "no"
+#      for the questions about installation of <foo>. In batch mode this means
+#      that <foo> will not be installed.
+
+# [PM] 3.11.3 SPRM 8328 empty means default or cached value
+opt_install_tcltk=''
+opt_install_jasper=''
+opt_install_bdb=''
+
+# [PM] 4.2 the features file will have prebuilt = maybe when prebuilt is enabled but not default.
+
+if [ "${feature_prebuilt}" = "maybe" ]; then
+    can_prebuilt=yes
+elif [ "${feature_prebuilt}" = "yes" ]; then
+    can_prebuilt=yes
+else
+    can_prebuilt=no
+fi
+
+# Here $feature_prebuilt == 'yes' (default to prebuilt), 'no' (never prebuilt), or 'maybe' (can prebuilt)
+# Here $can_prebuilt is 'yes' or 'no',
+# Here the current value of $prebuilt is ignored. From now on,
+# $prebuilt is the default when asking the user, and the value the
+# user answered, so we overwrite it here.
+
+if [ "${can_prebuilt}" = "yes" ]; then
+    ask_prebuilt=yes # Always ask if there is a choice, regardless of default.
+    # $feature_prebuilt:
+    # yes : both prebuilt and not prebuilt is allowed. Default to prebuilt.
+    # maybe: both prebuilt and not prebuilt is allowed. Default to not prebuilt.
+    # no: prebuilt is not possible.
+
+    # [PM] 4.5.0 Nowadays we always ask the user if there is a
+    # choice. SPRM-20398.
+    #
+    # [PM] 4.5.0 pre-4.5.0 non-prebuilt was the default on Linux, but
+    # this has changed (in configure.in).  do either. From now on we
+    # default to prebuilt on all platforms,
+
+
+    if [ "${feature_prebuilt}" = "maybe" ]; then
+	# [PM] 4.5.0 Do not expect this to happen anymore. All
+	# supprted platforms (Linux, macOS) defaults to prebuilt.
+	prebuilt=no
+    elif [ "${feature_prebuilt}" = "yes" ]; then
+	prebuilt=yes
+    else
+	prebuilt=no # We do not get here (feature_prebuilt=no ==> can_prebuilt=no
+    fi
+else # [ "${can_prebuilt}" = "no" ]
+    ask_prebuilt=no # No need to ask if can not install pre built.
+    prebuilt=no
+fi
+
+opt_prebuilt='' # [PM] 4.2 stays empty if no option set it.
+# [PM] 4.2 we may want prebuilt only for third-party things (e.g. Mac OS X)
+prebuilt_jasper=''
+prebuilt_tcltk=''
+prebuilt_bdb=''
+
+### Parse options
+while [ $# -ge 1 ]; do
+    opt=$1
+    shift
+    case $opt in
+	--nolicense)
+	    opt_nolicense=yes
+	    ;;
+        --verbose)
+            opt_verbose=yes
+            ;;
+	--batch)
+	    opt_batch=yes
+	    ;;
+
+	--all-questions)
+	    opt_all_questions=yes
+	    ;;
+	--help)
+            opt_help=yes
+	    ;;
+
+	--called-by-GUI)
+	    opt_called_by_GUI=yes
+            opt_verbose=yes
+	    ;;
+	--without-tcltk)
+	    opt_install_tcltk=no
+	    ;;
+	--without-java|--without-jasper)
+	    opt_install_jasper=no
+	    ;;
+	--without-bdb)
+	    opt_install_bdb=no
+	    ;;
+	--prebuilt)
+	    opt_prebuilt=yes
+	    ;;
+	--no-prebuilt)
+	    opt_prebuilt=no
+	    ;;
+	--prebuilt-jasper) # [PM] 4.2 not documented
+	    opt_prebuilt_jasper=yes
+	    ;;
+
+	--installdir|--prefix)
+	    installdir=$1
+	    shift
+	    ;;
+    esac
+done
+
+if [ $opt_batch = yes ]; then
+    opt_all_questions=yes;
+fi
+
+cat <<EOF
+				   
+		      SICStus Prolog Release 4
+		      ========================
+				   
+		      https://sicstus.sics.se/
+				   
+	       ---------------------------------------
+	       Binary Distribution Installation Script
+	       ---------------------------------------
+
+This script will install SICStus Prolog $spver on your computer. Before
+proceeding, make sure that you have downloaded the correct
+distribution and that you have your licensing information at hand, as
+you will be prompted for site-name, license code, and expiration date
+during the installation.
+
+It is also recommended that you read the Release Notes before installing
+SICStus Prolog. The Release Notes can be found online at
+
+	     https://sicstus.sics.se/docs/
+
+During the installation, a cache-file (install.cache) will be created
+which will store your answers to be used as defaults if you need to
+run the installation script again. You may safely delete this file if
+you wish.
+
+The installation script will ask a couple of questions regarding the
+installation. Most of these questions have a default alternative in
+square brackets ([]). Pressing return will give you the default
+answer. If you do not understand the question, the default answer will
+usually do what you want.
+
+Note: You must have Perl installed and available in your PATH. Perl is
+      available for free from www.cpan.org. Typically Perl is already
+      installed.
+
+Report bugs and other problems to SICStus Support using
+
+	 https://sicstus.sics.se/bugreport.html
+
+EOF
+
+if [ $opt_help = "yes" ]; then
+   cat<<EOF
+
+Options:
+  --prebuilt         Do not require a C compiler etc. during
+                     installation. The resulting install may have
+                     reduced functionality. The spld and splfr tools
+                     and libraries that interface to third-party
+                     products (Tcl/Tk, Berkeley DB, Java) may not
+                     work.
+  --no-prebuilt      Turn off --prebuilt even if it is the default.
+  --all-questions    Ask some questions that almost never need a
+                     non-default answer.
+  --batch            Do not ask any questions, uses cached values and defaults.
+  --help             Print this text and exit.
+
+  --without-tcltk    Do not install the Tcl/Tk interface (library(tcltk)).
+  --without-java     Do not install the Java interface (Jasper).
+  --without-bdb      Do not install the Berkeley DB module (library(bdb)).
+
+EOF
+   exit 0
+fi
+
+
+## [PM] 3.10.2 all platforms have SUSv2 "printf" should use that instead
+### Checking how to emulate 'echo -n'. This code is stolen
+### from Configure in the Perl distribution.
+n=''; c=''
+(echo "hi there\c" ; echo " ") >.echotmp
+if grep c .echotmp >/dev/null 2>&1 ; then
+	n='-n'
+	c=''
+else
+	n=''
+	c='\c'
+fi
+rm -f .echotmp
+
+
+# arg1: variable name
+# arg2: value
+cache_value() 
+{
+    mv "$cachefile" "$cachefile.tmp"
+    ( egrep -v -e "^$1" "$cachefile.tmp" ; echo "$1='$2'" ) > "$cachefile"
+    rm -f "$cachefile.tmp"
+}
+
+register_uninstall()
+{
+    to="$1"
+    todir=`dirname "$to"`
+
+    # [PM] 3.10.2 arguments may not be absolute
+    todirabs=`( cd "$todir" && pwd )`
+    tobase=`basename "$to"`
+    toabs="${todirabs}/${tobase}"
+    # Store the directory of this file to be able to 
+    # remove it when uninstalling
+    # dirname "$to" >> $uninstall_dirfile
+
+    # [PM] 3.10.2 all created dirs are logged by ensdir
+    # echo "$todirabs"  >> $uninstall_dirfile
+
+    # [PM] 3.10.2 also rm -f symbolic links to directories ($SP_RTSYS_DIRNAME)
+# [PD] 3.10.2 -L does not work on Solaris. Use -h instead
+#    if [ ! -d "$toabs" ] || [ -L "$toabs" ]; then
+    if [ ! -d "$toabs" ] || [ -h "$toabs" ]; then
+	echo "rm -f '${toabs}'" >> $uninstall_script
+    fi
+}
+
+# [PM] 3.9.1+ FIXME: cannot cope with spaces in dirname
+finish_uninstall()
+{
+    # Emit rmdir commands for each directory created.
+    # Make sure to remove the directories in depth-first post order
+    # in which they were created.
+    cat >> $uninstall_script <<EOF
+echo "Removing directories..."
+EOF
+    for dir in `cat $uninstall_dirfile | sort -r | uniq`; do
+        # [PM] 3.10.2 Now only created directories goes in uninstall_dirfile
+	# # Don't remove $installdir unless we created it.
+	# if [ $dir != "$installdir" -o $installdir_created = yes ]; then
+        #     # [PM] 3.9.1+ On MacOS X this will add an entry for
+        #     # /Applications if the launcher script was installed
+        #     # there. This should be a non-issue since
+        #     # 1. No-one uses the uninstall script anyway
+        #     # 2. The /Applications folder will not be empty so rmdir
+        #     #    will just barf.
+	    echo "rmdir '$dir'" >> $uninstall_script
+	# fi
+    done
+    rm -f $uninstall_dirfile
+}
+
+install_file()
+{
+    from="$1"
+    to="$2"
+    mode="$3"
+
+    if [ "x$opt_verbose" = "xyes" ]; then
+      # [PM] 3.9.1+ strip $installdir component to make the size of the log more predictable
+      #             (the size of the log is used to size the progress bar in the SICStus Installer Tool)
+      to_name=`echo "$to" | sed -e "s,^$installdir/,,"`
+      echo "installing $to_name"
+    fi
+
+    if [ ! -f "$from" ]; then     # [PM] 3.9.1b4 barf if nonexistent
+      echo
+      echo "*Error*: Required file \"$from\" does not exist. See $install_log and $errorlog for details."
+      echo "Installation aborted."
+      exit 1
+    fi
+
+    # Make sure target directory exists.
+    todir=`dirname "$to"`
+    # $MKDIR "$todir"
+    "${ENSDIR}" "$todir" "$uninstall_dirfile" $defdirmode
+
+    # [PM] 3.10.2 Do only post processing if two identical paths (SPRM 5479)
+    if [ "$from" != "$to" ]; then
+      # [PM] 3.9.1 added -p in anticipation of MacOS X 10.1 ranlib libsprt30.dylib problems
+      cp -p "$from" "$to"
+    fi
+    # cannot use CHMOD (from configure) here since we get called before configure is run.
+    chmod $mode "$to"
+
+    register_uninstall "$to"
+}
+
+### Subroutine to prompt the user
+# arg1 = Prompt
+# arg2 = Default value
+# Rest = Accepted values
+prompt_user () {
+    prompt=$1
+    if [ $# -ge 1 ]; then
+	shift
+	default=$1
+    else
+	default=""
+    fi
+    if [ $# -ge 1 ]; then
+	shift
+	accept=$*
+    else
+	accept=""
+    fi
+	
+    if [ $opt_batch = yes ]; then
+	ans=$default
+	printf '%s' "$prompt ? (batch) $default"
+        # [PM] 3.9RC1 newline after batch answers too. (remove $n $c on the line above instead?)
+        echo
+    else
+	valaccept=""
+	
+	while [ -z "$valaccept" ]; do
+	    printf '%s' "$prompt"
+	    if [ -n "$default" ]; then
+		printf '%s' " [$default]"
+	    fi
+	    printf '%s' " ? "
+	    
+	    read ans
+	    
+	    if [ -n "$ans" ]; then
+		if [ -n "$accept" ]; then
+		    for val in $accept; do
+			if [ ".$ans." = ".$val." ]; then
+			    valaccept=$ans
+			fi
+		    done
+		    if [ -z "$valaccept" ]; then
+			echo "Please answer one of \"$accept\""
+		    fi
+		else
+		    valaccept=$ans
+		fi
+	    else
+		valaccept=$default
+		break
+	    fi
+	done
+	ans=$valaccept
+    fi
+}
+
+# Sets ans to "yes" if license checksum is OK
+# xref licman.pl
+valid_license_checksum () {
+  ans=no
+
+  while true; do
+    # [PM] 3.10 verify license checksum. xref Bips/licman.pl
+    product_orig=$1
+    site_orig=$2
+    expiration_orig=$3
+    license_orig=$4
+
+    SED=sed
+    TR=tr
+
+# [PD] 4.0.0
+#    product="$product_orig"
+    ## Remove anything not in [a-zA-Z0-9._] then downcase
+    product=`echo "$product_orig" | ${SED} -e 's/[^a-zA-Z0-9_\.]//g'`
+    product=`echo "$product" | ${TR} 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'`
+
+    ## Remove anything not in [a-zA-Z] then downcase
+    site=`echo "$site_orig" | ${SED} -e 's/[^a-zA-Z]//g'`
+    site=`echo "$site" | ${TR} 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'`
+
+    # remove anything not in [a-zA-Z0-9] then if first char is in [pP]
+    # assume 'permanent' otherwise keep as is
+    expiration=`echo "$expiration_orig" | ${SED} -e 's/[^a-zA-Z0-9]//g'`
+    case "$expiration" in
+     p*|P*)
+       expiration='permanent'
+       ;;
+     *)
+       ;;
+    esac
+
+    # downcase of any chars in [a-zA-Z0-9].
+    license=`echo "$license_orig" | ${SED} -e 's/[^a-zA-Z0-9]//g'`
+    license=`echo "$license" | ${TR} 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'`
+
+    license_check=`echo "$license" | ${SED} -n -e 's/^\(....\).*$/\1/p'`
+    if [ -z "$license_check" ]; then
+      echo "Malformed license code \"$license_orig\"" 1>&2
+      if [ ".$opt_verbose." = .yes. ]; then
+        echo "Canonical site==\"$site\", Canonical date==\"$expiration\", Canonical license==\"$license\"" 1>&2
+      fi
+      # exit 1
+      ans=no
+
+      # [PM] 3.10.2 SPRM 5239 At least for some versions of sh a break
+      #      10 here will not break out of the outermost loop in this
+      #      function but will instead break out of loops in the
+      #      caller.  This is clearly stupid but neither SUSv3 nor the
+      #      bash-2.5b info pages are clear on what the intended
+      #      behavior is. Same bogus behaviour on all our platforms
+      #      except AIX.
+      # break 10
+      return
+    fi
+
+    license=`echo "$license" | ${SED} -n -e 's/^....\(.*\)$/\1/p'`
+    string="${product}${site}${expiration}${license}"
+
+    sum_a=0
+    sum_b=0
+    # [PM] 3.10.0.1 yes if a and b have traded places and need to be
+    #               exchanged after the while loop.
+    flipped=no
+    while [ ! -z "$string" ]; do
+      case "$string" in
+       _*) C=95 ;;
+       .*) C=46 ;;
+       0*) C=48 ;;
+       1*) C=49 ;;
+       2*) C=50 ;;
+       3*) C=51 ;;
+       4*) C=52 ;;
+       5*) C=53 ;;
+       6*) C=54 ;;
+       7*) C=55 ;;
+       8*) C=56 ;;
+       9*) C=57 ;;
+       a*) C=97 ;;
+       b*) C=98 ;;
+       c*) C=99 ;;
+       d*) C=100 ;;
+       e*) C=101 ;;
+       f*) C=102 ;;
+       g*) C=103 ;;
+       h*) C=104 ;;
+       i*) C=105 ;;
+       j*) C=106 ;;
+       k*) C=107 ;;
+       l*) C=108 ;;
+       m*) C=109 ;;
+       n*) C=110 ;;
+       o*) C=111 ;;
+       p*) C=112 ;;
+       q*) C=113 ;;
+       r*) C=114 ;;
+       s*) C=115 ;;
+       t*) C=116 ;;
+       u*) C=117 ;;
+       v*) C=118 ;;
+       w*) C=119 ;;
+       x*) C=120 ;;
+       y*) C=121 ;;
+       z*) C=122 ;;
+       *)
+         if [ ".$opt_verbose." = .yes. ]; then
+           echo "unexpected characters \"$string\" in licence code" 1>&2
+         fi
+         # exit 1
+         ans=no
+         # [PM] 3.10.2 SPRM 5239
+         # break 10
+         return
+       ;;
+       esac
+       string=`echo "$string" | ${SED} -e 's/^.//'`
+       # echo "sum_a==\"$sum_a\", sum_a:=$(( ($sum_a + $C) % 256 ))" 1>&2
+
+       # not all sh supports POSIX/SUSv2 shell arithmetics
+       # sum_a=$(( ($sum_a + $C) % 256 ))
+       sum_a=`expr '(' $sum_a '+' $C ')' '%' '256' `
+       # echo "sum_a==$sum_a" 1>&2
+       tmp=$sum_a
+       sum_a=$sum_b
+       sum_b=$tmp
+       if [ $flipped = no ]; then
+         flipped=yes
+       else
+         flipped=no
+       fi
+    done
+    if [ $flipped = yes ]; then
+      tmp=$sum_a
+      sum_a=$sum_b
+      sum_b=$tmp
+    fi
+
+
+    checksumchars=""
+    sum_a_string=`printf "%x" $sum_a`
+    # prepend zero if single digit (could hack printf width/padding arg instead)
+    case "$sum_a_string" in
+      ?)
+       sum_a_string="0$sum_a_string"
+       ;;
+    esac
+    sum_b_string=`printf "%x" $sum_b`
+    case "$sum_b_string" in
+      ?)
+       sum_b_string="0$sum_b_string"
+       ;;
+    esac
+
+    # [PM] 3.10.0.1 Was (wrong if either sum is single digit)
+    # string=`printf "%x%x" $sum_a $sum_b`
+    string="${sum_a_string}${sum_b_string}"
+
+    while [ ! -z "$string" ]; do
+      case "$string" in
+        0*) C='2' ;; 1*) C='3' ;; 2*) C='4' ;; 3*) C='5' ;; 4*) C='6' ;; 5*) C='7' ;; 6*) C='8' ;; 7*) C='9' ;;
+        8*) C='a' ;; 9*) C='b' ;; a*) C='c' ;; b*) C='d' ;; c*) C='e' ;; d*) C='f' ;; e*) C='g' ;; f*) C='h' ;;
+      esac
+      checksumchars="${checksumchars}$C"
+      string=`echo "$string" | ${SED} -e 's/^.//'`
+    done
+    if [ ".$opt_verbose." = .yes. ]; then
+      echo "checksum==\"${checksumchars}\""
+    fi
+    if [ "X$checksumchars" != "X$license_check" ]; then
+      if [ ".$opt_verbose." = .yes. ]; then
+        echo "Incorrect license checksum" 1>&2
+      fi
+      # exit 1
+      ans=no
+      # [PM] 3.10.2 SPRM 5239
+      # break 10
+      return
+    fi
+    ans=yes
+    # [PM] 3.10.2 SPRM 5239
+    # break 10
+    return
+  done
+}
+
+# [PM] 3.10 Sets ans to "yes" if cryptkey checksum is OK
+# Also sets canonical_key to a sanitized version, suitable as
+# input to SP_INSTALL_DECRYPT
+
+# xref /src/sicstus/etc/mkkey
+valid_decryptkey_checksum () {
+  ans=no
+  while true; do
+    code_orig=$1
+
+    SED=sed
+    TR=tr
+
+    ## Remove anything not in [a-zA-Z] then downcase
+    code=`echo "$code_orig" | ${SED} -e 's/[^a-zA-Z]//g'`
+    code=`echo "$code" | ${TR} 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'`
+
+    if [ -z "$code" ]; then   # [PM] 3.10.1 do not accept empty key
+      if [ ".$opt_verbose." = .yes. ]; then
+        echo "Decrypt key empty after canonicalization" 1>&2
+      fi
+      ans=no
+      # [PM] 3.10.2 SPRM 5239
+      # break 10
+      return
+    fi
+
+    canonical_key="$code"
+
+    ## Substitute confusable chars "l" and "o" for "y" and "z", respectively
+    code=`echo "$code" | ${TR} 'yz' 'lo'`
+
+
+    string="${code}"
+
+    base="23";
+    ord_a=97 # ASCII 'a'
+
+    sum=0
+    mul_a=2
+    mul_b=1
+    while [ ! -z "$string" ]; do
+      case "$string" in
+       a*) C=97 ;;
+       b*) C=98 ;;
+       c*) C=99 ;;
+       d*) C=100 ;;
+       e*) C=101 ;;
+       f*) C=102 ;;
+       g*) C=103 ;;
+       h*) C=104 ;;
+       i*) C=105 ;;
+       j*) C=106 ;;
+       k*) C=107 ;;
+       l*) C=108 ;;
+       m*) C=109 ;;
+       n*) C=110 ;;
+       o*) C=111 ;;
+       p*) C=112 ;;
+       q*) C=113 ;;
+       r*) C=114 ;;
+       s*) C=115 ;;
+       t*) C=116 ;;
+       u*) C=117 ;;
+       v*) C=118 ;;
+       w*) C=119 ;;
+       x*) C=120 ;;
+       # These are used to encode "l" and "o"
+       # y*) C=121 ;;
+       # z*) C=122 ;;
+       *)
+         if [ ".$opt_verbose." = .yes. ]; then
+           echo "unexpected characters \"$string\" in decrypt key" 1>&2
+         fi
+         # exit 1
+         ans=no
+         # [PM] 3.10.2 SPRM 5239
+         # break 10
+         return
+       ;;
+       esac
+       # remove first char from string
+       string=`echo "$string" | ${SED} -e 's/^.//'`
+       # not all sh supports POSIX/SUSv2 shell arithmetics
+       sum=`expr '(' $sum '+' '(' '(' $C '-' $ord_a ')' '*' $mul_a ')' ')' '%' $base `
+       # echo "sum==$sum" 1>&2
+       tmp=$mul_a
+       mul_a=$mul_b
+       mul_b=$tmp
+    done
+
+    if [ "X$sum" = "X0" ]; then
+      ans=yes;
+    else
+      ans=no;
+    fi
+    # [PM] 3.10.2 SPRM 5239
+    # break 10
+    return
+  done
+}
+
+scan_error_log()
+{
+    rm -f $configure_warnings
+    rm -f $configure_errors
+    warning_pattern="^.*: WARNING: "
+    error_pattern="^.*: error: "
+    case "$1" in
+	warnings)
+            grep "$warning_pattern" $errorlog &> $configure_warnings
+	    ;;
+	errors)
+            grep "$warning_pattern" $errorlog &> $configure_warnings
+            grep "$error_pattern" $errorlog &> $configure_errors
+	    ;;
+    esac
+    if [ -s "$configure_warnings" ]; then
+	echo "The following warnings were issued when configuring SICStus:"
+	cat $configure_warnings
+	echo
+    fi
+    if [ -s "$configure_errors" ]; then
+	echo "The following errors were issued when configuring SICStus:"
+	cat $configure_errors
+	echo
+    fi
+}
+
+will_now_proceed_without_questions_message()
+{
+  echo
+  echo '***************************************************************'
+  echo 'The installation will proceed without further user interaction,'
+  echo 'unless there are errors.'
+  echo '***************************************************************'
+  echo
+}
+
+prebuilt_help()
+{
+      cat <<EOF
+
+If you do not have a C compiler and its supporting files, and for some
+reason do not wish to install them, you can install a pre-built
+version of SICStus.
+
+One disadvantage with the pre-built installation is that SICStus
+libraries that interface to third-party products (Tcl/Tk, Berkeley DB,
+Java, ODBC) may not work, or may require environment variables such as
+LD_LIBRARY_PATH to be set.  Another disadvantage is that spld
+and splfr may not work unless you manually adjust the configure file
+($installdir/bin/spconfig-$spver).
+Of course neither spld nor splfr will work anyway if you do not have
+a C compiler.
+
+If you are unsure, a prebuilt installation is most likely OK. You can
+always reinstall later, if needed.
+
+EOF
+
+}
+
+echo
+prompt_user "Install SICStus Prolog 4.6.0" yes yes no
+if [ ".$ans." = .no. ]; then 
+    echo "Installation aborted."
+    exit 1
+fi
+
+echo 
+printf '%s' "Checking installation cache... "
+if [ -f "$cachefile" ]; then
+    echo `basename "$cachefile"`
+    . "$cachefile"
+else
+    echo "no"
+    echo "# Cache-file created on `date`" > "$cachefile"
+fi
+
+# [PM] 4.2 override cached values with explicit command line options
+if [ "x${opt_prebuilt}" != "x" ]; then
+  prebuilt="${opt_prebuilt}"
+fi
+if [ "x${opt_prebuilt_jasper}" != "x" ]; then
+  prebuilt_jasper="${opt_prebuilt_jasper}"
+fi
+
+
+# [PM] 3.9.1b4 if integrity check is re-enabled it need to go after the TAR unpacking
+# Ignore integrity check for now; it takes too long and is too picky. Also, 
+# it cannot handle filenames with dollarsigns in it.
+icheck_ok=yes
+if false; then
+echo
+printf '%s' "Checking distribution integrity... "
+if test .$icheck_ok. = .yes. || test .$ignore_icheck_result. = .yes.; then
+    echo "(cached) ok." 
+else
+    printf '%s' "(please wait) "
+    icheck_ok=yes
+    for file in $distrfiles; do
+	if [ ! -f "$file" ]; then
+	    echo "File $file does not exist." >> $errorlog
+	    icheck_ok=no
+	fi
+    done
+
+    if [ $icheck_ok = yes ]; then
+	for file in `cat $filelist`; do
+	    # Quote all periods and dollarsigns in the file name. Otherwise,
+	    # filenames containing those character will not be matched correctly.
+	    fileq=`echo $file | sed -e 's/\./\\\./g' | sed -e 's/\$/\\\$/g'`
+	    size=`egrep -e "$fileq\$" $filechklist | \
+		sed -e 's/^\([0-9][0-9]*\) .*$/\1/'`
+	    if [ ! -f "$file" ]; then
+		echo "File $file not present in archive." >> $errorlog
+		icheck_ok=no
+	    else
+		actual_size=`\ls -l $file | awk '{ print $5 }'`
+		if [ ".$actual_size." != ".$size." ]; then
+		    echo "File $file is corrupt (size = $actual_size, expected $size)" >> $errorlog
+		    icheck_ok=no
+		fi
+	    fi    
+	done
+    fi
+
+    if [ .$icheck_ok. = .no. ]; then
+	echo
+	echo "Integrity check failed. Integrity check log:"
+	cat $errorlog
+	cat <<EOF
+
+This probably means that your distribution has been damaged in some
+way (ascii-download, bad/broken connection, etc.).  You can, however,
+choose to continue the installation procedure (at your own risk, of
+course). This is not recommended, but may be useful in some
+circumstances.  Also, continuing will disable integrity checking for
+this distribution.
+
+EOF
+
+	prompt_user Continue $ignore_icheck_result yes no
+	ignore_icheck_result=$ans
+	cache_value ignore_icheck_result $ans
+	if [ ".$ans." = .no. ]; then 
+	    echo "Installation aborted."
+	    exit 1
+	else
+	    echo "Continuing despite broken distribution..."
+	fi
+    else
+	echo "ok."
+	cache_value icheck_ok yes
+    fi
+fi
+fi                              # false
+
+
+
+installdir_ok=no
+while [ $installdir_ok = no ]; do
+    echo
+    prompt_user "Where do you want to install SICStus" "$installdir"
+    installdir="$ans"
+    
+    case "$installdir" in
+    /*)
+       cache_value installdir "$installdir"
+
+       if [ ! -d "$installdir" ]; then
+           prompt_user "Directory $installdir does not exist. Create" yes yes no
+           if [ ".$ans." = .yes. ]; then
+               # $MKDIR $installdir
+               "${ENSDIR}" "$installdir" "$uninstall_dirfile" $defdirmode
+               installdir_created=yes
+           fi
+       fi
+
+       if test -d "$installdir" &&
+           touch "$installdir"/dummy >/dev/null 2>&1 && \
+           cat "$installdir"/dummy >/dev/null 2>&1; then
+               installdir_ok=yes
+               options="$options --prefix=$installdir"
+       else
+           echo 
+           echo "\"$installdir\" does not exist or is not writable by you."
+           echo "Please enter another directory."
+           if [ $opt_batch = yes ]; then # [PM] 3.9.1 meaningless to re-prompt if --batch
+              echo "Installation aborted."
+              exit 1
+           fi
+       fi
+       ;;
+     *)                         # PRM 3300 barf on relative path
+       echo 
+       echo "\"$installdir\" is not an absolute path"
+       echo "Please enter another directory."
+       if [ $opt_batch = yes ]; then # [PM] 3.9.1 meaningless to re-prompt if --batch
+          echo "Installation aborted."
+          exit 1
+       fi
+       ;;
+    esac
+    rm -f "$installdir"/dummy >/dev/null 2>&1
+done
+
+# INDEX.pl is the last file to be copied. If INDEX.pl exists in
+# the installation directory, ask the user if he/she really wants 
+# to re-install the files.
+if [ -f "$installdir/lib/$SP_DIRNAME/library/INDEX.pl" ]; then
+    cat <<EOF
+
+The target directory seems to already contain a SICStus installation. You can
+choose between cancelling the installation ('cancel'), overwriting the
+installation entirely ('overwrite'), or skip copying the files but
+(re-)do the dump and link steps ('link'). 
+
+Note: if you use the 'link' option, no new uninstall-script will be created.
+
+EOF
+
+    prompt_user "Overwrite existing installation" $overwrite_install cancel overwrite link
+    overwrite_install=$ans
+    cache_value overwrite_install $ans
+else
+    overwrite_install=overwrite
+fi
+
+if [ $overwrite_install = cancel ]; then
+    echo
+    # [PM] 3.9.1 was:
+    # echo "Installation complete."
+    # exit 0
+    echo "Installation aborted."
+    exit 1
+fi
+
+if [ $overwrite_install = overwrite ]; then
+    echo 
+    echo "Creating uninstall script..."
+    cat > $uninstall_script <<EOF
+#! /bin/sh
+# *** This script is automatically generated! ***
+# (this script does not yet remove everything it should)
+# File: `basename $uninstall_script`
+# 
+# Remove a SICStus installation. 
+#
+# Installation directory: $installdir
+# Installation started on: $now
+echo "Removing SICStus Prolog $spver installation from $installdir..."
+EOF
+else
+    uninstall_script=/dev/null
+fi
+
+# [PM] 4.4.1 Encryption is no longer used for installers. SPRM-20098.
+if [ "x${ENCRYPTED_INSTALLER}" = "xyes" ]; then
+decrypt_key_ok=no
+while [ $decrypt_key_ok = no ]; do
+
+  prompt_user "Decrypt key" "$decrypt_key"
+  decrypt_key="$ans"
+  # cache only valid keys
+  # cache_value decrypt_key "$decrypt_key"
+
+  decrypt_key_ok=yes
+
+  if [ $decrypt_key_ok = yes ]; then
+    ans=no
+    # also sets canonical_key
+    valid_decryptkey_checksum "$decrypt_key"
+    decrypt_key_ok="$ans"
+    canonical_decryptkey="${canonical_key}"
+  fi
+  if test "$decrypt_key_ok" != "yes"; then
+     cat <<EOF
+The supplied decryption key is invalid.
+
+EOF
+     decrypt_key_ok=no
+  fi
+
+  if [ $decrypt_key_ok != yes ]; then
+    echo "The installation cannot continue without a valid decryption key."
+    decrypt_key_ok=no
+    if [ $opt_batch = yes ]; then # [PM] meaningless to re-prompt if --batch
+      echo "Installation aborted."
+      exit 1
+    fi
+  fi
+
+  if [ $decrypt_key_ok = yes ]; then
+    cache_value decrypt_key "$decrypt_key"
+  fi
+done # decrypt_key_ok=no
+fi # ENCRYPTED_INSTALLER
+
+cat <<EOF
+
+You should now enter your site-name, license-code, and expiration date.
+
+EOF
+
+licinfo_ok=no
+
+if [ ".$opt_nolicense." = .yes. ]; then
+   echo "Not reading license information"
+   licinfo_ok=yes
+fi
+
+while [ $licinfo_ok = no ]; do
+
+    prompt_user "Sitename" "$sitename"
+    sitename="$ans"
+    cache_value sitename "$sitename"
+
+    prompt_user "License-code" "$licensecode"
+    licensecode="$ans"
+    cache_value licensecode "$licensecode"
+
+    prompt_user "Expiration date" "$expires"
+    expires="$ans"
+    cache_value expires "$expires"
+
+    licinfo_ok=no
+    if test "$sitename" && test "$licensecode"; then
+	licinfo_ok=yes
+    else
+       	echo "You must specify site-name and license-code."
+        licinfo_ok=no
+    fi
+    if [ $licinfo_ok = yes ]; then
+      ans=no
+      valid_license_checksum "sicstus4.6_linux" "$sitename" "$expires" "$licensecode"
+      licinfo_ok="$ans"
+    fi
+    if test "$licinfo_ok" != "yes"; then
+       cat <<EOF
+The supplied license information is not valid.
+Note that the license info consists of three equally important parts,
+they must be exactly as specified in the license info obtained from SICS.
+  Site: "$sitename"
+  Expiration: "$expires" ("permanent" or something like 20031230)
+  License-code: "$licensecode" (something like 5a6g-b9ce-c5dh-bp5m-g92s)
+A common mistake is to mis-type the site information.
+
+EOF
+       licinfo_ok=no
+    fi
+
+    if [ $licinfo_ok != yes ]; then
+	echo "The installation cannot continue without a valid license."
+	licinfo_ok=no
+        if [ $opt_batch = yes ]; then # [PM] 3.9.1 meaningless to re-prompt if --batch
+           echo "Installation aborted."
+           exit 1
+        fi
+    fi
+done # while licinfo_ok=no
+
+# [PM] 4.3 FIXME: this (disabled code) should first ask whether spre
+# should be installed. Currently it would unconditionally require a
+# decryption key, also for those that do not require spre.
+: ${spre_decrypt_key="none"}
+if [ "x$enable_encrypted_spre" = "xyes" ]; then
+if [ "x$opt_all_questions" = "xyes" ]; then
+spre_decrypt_key_ok=no
+while [ $spre_decrypt_key_ok = no ]; do
+
+  prompt_user "Extended Runtime decrypt key" "$spre_decrypt_key"
+  spre_decrypt_key="$ans"
+
+  if [ "${spre_decrypt_key}" = "none" ]; then
+    spre_decrypt_key_ok=yes
+  else # spre_decrypt_key != none
+    ans=no
+    # also sets canonical_key
+    valid_decryptkey_checksum "$spre_decrypt_key"
+    spre_decrypt_key_ok="$ans"
+    canonical_spre_decryptkey="${canonical_key}"
+  fi
+
+  if test "$spre_decrypt_key_ok" != "yes"; then
+     cat <<EOF
+The supplied decryption key is invalid.
+
+EOF
+     spre_decrypt_key_ok=no
+     spre_decrypt_key=none
+  fi
+
+  if [ $spre_decrypt_key_ok != yes ]; then
+    echo "The installation cannot continue without a valid decryption key."
+    spre_decrypt_key_ok=no
+    if [ $opt_batch = yes ]; then # [PM] meaningless to re-prompt if --batch
+      echo "Installation aborted."
+      exit 1
+    fi
+  fi
+
+  if [ $spre_decrypt_key_ok = yes ]; then
+    cache_value spre_decrypt_key "$spre_decrypt_key"
+  fi
+done # spre_decrypt_key_ok=no
+
+fi                              # opt_all_questions
+fi                              # enable_encrypted_spre
+
+
+ask_for_prebuilt()
+{
+  go_on=yes
+  while [ $go_on = yes ]; do
+      prebuilt_help
+
+      prompt_user "Install the pre-built binaries (choose \"no\" for full installation)" $prebuilt yes no
+
+      if [ $ans != help ]; then
+	  prebuilt=$ans
+	  cache_value prebuilt $prebuilt
+	  go_on=no
+      else # help
+	  prebuilt_help
+      fi
+  done                          # install prebuilt yes/no
+}
+
+# [PM] 4.5.0 Now always ask if there is a choice. SPRM-20398.
+if [ "xyes" = "xyes" ]; then
+    if [ "${ask_prebuilt:-yes}" != "no" ]; then
+	ask_for_prebuilt
+    fi
+fi                              # prebuilt enabled
+
+
+# prebuilt is yes or no here
+
+# [PM] 4.2 On Mac OS X, fall back to prebuilt automatically
+if [ "xyes" = "xyes" ]; then
+  if [ $prebuilt = no ]; then
+    if [ $sp_darwin = yes ]; then
+      # [PM] 4.2.3 Do not use "c" as variable name, conflicts with echo (SPRM 12746).
+      for cc_name in ${CC} cc gcc; do
+        if "${cc_name}" --version 1>/dev/null 2>&1 ; then
+          found_cc="${cc_name}"
+          break;
+        fi
+      done
+      if [ -z "${found_cc}" ]; then
+        echo '***************************************************************'
+        echo 'No C compiler was found. For a full install you need to first  '
+        echo 'download and install Xcode from Apple.                         '
+        echo 'Alternatively, you can install the pre-built binaries which may'
+        echo 'affect some components of SICStus                              '
+        echo '***************************************************************'
+        ask_for_prebuilt
+      fi
+    fi
+  fi
+fi
+
+if [ $prebuilt = yes ]; then
+  prebuilt_jasper=yes
+  prebuilt_tcltk=yes
+  prebuilt_bdb=yes
+else
+  : # [PM] 4.2 non-prebuilt sets these up later
+fi
+
+
+#   if [ "xyes" = "xyes" ]; then
+#     if [ "x$opt_all_questions" = "xyes" ]; then
+
+#      if [ x"$has_java_jni" = xyes ]; then
+#         prompt_user "Install the pre-built jasper library" $prebuilt_jasper no yes
+#         prebuilt_jasper=$ans
+#         cache_value prebuilt_jasper $prebuilt_jasper
+#       fi                        # has_java_jni
+
+#       if [ x"$has_tcltk" = xyes ]; then
+#         prebuilt_tcltk=no
+#         prompt_user "Install the pre-built Tcl/Tk library" $prebuilt_tcltk no yes
+#         prebuilt_tcltk=$ans
+#         cache_value prebuilt_tcltk $prebuilt_tcltk
+#       fi                        # has_tcltk
+
+#       if [ $has_bdb = yes ]; then
+#         prebuilt_bdb=no
+#         prompt_user "Install the pre-built BerkeleyDB library" $prebuilt_bdb no yes
+#         prebuilt_bdb=$ans
+#         cache_value prebuilt_bdb $prebuilt_bdb
+#       fi                        # has_bdb
+
+#     fi                          # opt_all_questions
+#   fi                            #  PREBUILT_INSTALL_ENABLED
+
+
+# [PM] 3.9.1+ Install a double clickable Terminal.app script for launching sicstus.
+install_launcher_script=no
+if [ $sp_darwin = yes ]; then
+if [ -f macosx_launcher.term.in ]; then
+if [ "x$opt_all_questions" = "xyes" ]; then
+    install_launcher_script=$clickscript
+    prompt_user "Do you wish to install a script into the Applications folder for launching SICStus" $clickscript yes no
+    install_launcher_script=$ans
+    cache_value clickscript $install_launcher_script
+fi                              # all questions
+fi                              # template exists
+fi                              # sp_darwin
+
+
+# [PM] 4.2 Check headers only if not prebuilt ([PM] 4.3.4 test was inverted, SPRM 15009)
+if [ $prebuilt = no ]; then
+  # [PD] 3.9.1 Check if glibc header files and runtime agree on version (linux only)
+  sysname=`uname | tr [A-Z] [a-z]`
+  if [ "x$sysname" = "xlinux" ]; then
+      cat >dummy.c <<EOF
+  #include <stdio.h>
+  #include <gnu/libc-version.h>
+  int main (void) { puts (gnu_get_libc_version ()); return 0; }
+EOF
+      if ${CC-cc} dummy.c -o ./dummy 1>> $install_log 2>&1 ; then
+          :
+      else
+          rm -f dummy dummy.c
+          echo 'Could not compile and link a simple C program. This is needed for doing a full install.'
+          echo 'Most likely your system is lacking the necessary development files,'
+          echo 'like a C compiler or C library development files.'
+          echo 'See the SICStus web site for more information about prerequisites.'
+          echo ''
+          echo 'After you have installed the necessary prerequisites you can run the installer again.'
+          echo 'Alternatively, invoke the installer with the --prebuilt flag, e.g.'
+          echo '   sudo ./InstallSICStus --prebuilt'
+          echo ''
+          echo 'Installation aborted.'
+          exit 1
+      fi
+      libc_version=`./dummy | sed -e "s/\([0-9]*\.[0-9]*\)\.[0-9]*/\1/"`
+      rm -f dummy dummy.c
+      sp_platform_libc_version=`./sp_platform | sed -e "s/.*linux-glibc\(.*\)/\1/"`
+      if [ ".$libc_version." != ".$sp_platform_libc_version." ]; then
+          echo "Glibc header files and runtime system disagree on version."
+          echo "Header files:   ${sp_platform_libc_version:-unknown}"
+          echo "Runtime system: ${libc_version:-unknown}"
+          ignore_glibc_version_mismatch=no
+          if [ "x$opt_all_questions" = "xyes" ]; then
+              prompt_user "Attempt an installation anyway" no yes no
+              ignore_glibc_version_mismatch=$ans
+          else
+              echo "If you rerun InstallSICStus with the option --all-questions,"
+              echo "you can proceed with the installation despite this mismatch."
+          fi
+          cache_value ignore_glibc_version_mismatch $ignore_glibc_version_mismatch
+          if [ ".$ignore_glibc_version_mismatch." = .no. ]; then 
+              echo "Installation aborted."
+              exit 1
+          else
+              echo "Continuing despite Glibc version mismatch..."
+          fi
+      fi
+  fi
+
+fi                              # prebuilt
+
+
+if [ $prebuilt = no ]; then
+
+cat <<EOF
+
+The script will now ask you for some information about external
+software packages. If you leave the answers blank, the script will try
+to determine the information automatically.
+
+EOF
+
+if [ x"$has_tcltk" = xyes ]; then
+    install_tcltk="${opt_install_tcltk:-${install_tcltk:-yes}}"
+
+    if test $sp_darwin != yes || test $opt_all_questions = yes; then # [PM] 4.2 on darwin we should not ask by default (SPRM 12041)
+        prompt_user "Do you wish to install the Tcl/Tk interface (library(tcltk))" "${install_tcltk}" yes no
+    else
+        # [PM] 4.2 On Darwin the default answer is yes
+        ans=yes
+    fi
+    cache_value install_tcltk "${ans}"
+
+    if [ ".$ans." = .yes. ]; then
+	if [ ".$opt_called_by_GUI." = .yes. ]; then
+	    prompt_user "Specify a libtk shared library for linking, e.g. /usr/local/lib/libtk.so" $libtk_path
+	    libtk_path=$ans
+	    cache_value libtk_path $libtk_path
+	    if [ ! -z "$libtk_path" ]; then
+		options="$options --with-libtk=$libtk_path"
+	    else
+		# [PD] 3.10.1 (For darwin): $libtk_path is empty, since we use
+                #      the Framework Aqua Tcl/Tk. We need to tell configure to
+                #      look for it, so set the --with-tcltk option.
+		options="$options --with-tcltk"
+	    fi
+	else
+            if test $sp_darwin != yes || test $opt_all_questions = yes; then # on darwin we should not ask by default
+                # [PM] 4.3.1 OS X is "special" (SPRM 14302).
+    	        if test $sp_darwin = yes; then # OS X
+                cat <<EOF
+For the Tcl/Tk interface you should now specify the 'framework' directory of
+the Tcl/Tk installation.
+For the Apple default Tcl/Tk,
+this should be /System/Library/Frameworks (the default).
+For third-party versions of Tcl/Tk (e.g. ActiveTcl),
+this typically should be /Library/Frameworks
+EOF
+                else # not OS X
+                # [PD] 3.10.1 Add explanation of what to enter here.
+                cat <<EOF
+For the Tcl/Tk interface you should now specify the 'prefix' directory of
+the Tcl/Tk installation. E.g. if the path to the dynamic tk library is
+/usr/local/lib/libtk.so, the 'prefix' directory (a.k.a. 'installation path')
+is /usr/local.
+EOF
+                fi # not OS X
+                prompt_user "Specify Tcl/Tk installation path (or leave blank)" $tcltk_path
+            else
+                # [PM] 4.2 On Darwin we should let configure search in the default locations
+                ans=''
+            fi
+	    tcltk_path=$ans
+	    cache_value tcltk_path $tcltk_path
+
+            # [PM] 4.3.1 Specifying a version does not work on OS X (configure.in bug) (SPRM 14302).
+	    if test $sp_darwin = yes; then # OS X
+               ans=''
+            else # not OS X
+	    if [ x"$opt_all_questions" = xyes ]; then
+		prompt_user "What version of Tcl/Tk do you have (or leave blank)" $tcltk_version
+                # [PM] SPRM 2128 strip patch revision (third component, if present)
+		ans=`echo "$ans" | sed -e 's/\([0-9]*\)\.\([0-9]*\)\.[0-9]*/\1.\2/'`
+	    else
+                # # or use (cached) $tcltk_version?
+		# ans=""
+                # [PD] 3.11.3 [SPRM 8083] Yes, use the cached value. The first
+                #             time InstallSICStus is run there is no cached
+                #             value, but tcltk_version will have a value since
+                #             the feature file has been sourced. This value is
+                #             the TCL/TK version that SICStus was built with
+                #             so it should be the default if the user does
+                #             not specify something else.
+                ans=$tcltk_version
+	    fi
+            fi # not OS X
+
+	    tcltk_version=$ans
+	    cache_value tcltk_version $tcltk_version
+
+	    if [ -n "$tcltk_path" ]; then
+		options="$options --with-tcltk=$tcltk_path"
+	    fi
+            # [PM] 4.0.3 Needed for r2d2 (Ubuntu) even though Tcl/Tk
+            # DSO is in default /usr/lib/ since  tcl.h is in
+            # /usr/include/tcl8.5/tcl.h so will not be found by
+            # configure unless version is specied
+	    if [ -n "$tcltk_version" ]; then
+		# [PD] 4.0.5 add version fallback option    
+		options="$options --with-tcltkversion=$tcltk_version --enable-tcltk-version-fallback"
+            fi
+	fi
+    else
+	options="$options --without-tcltk"
+	has_tcltk=no
+    fi
+else
+    echo "[Tcl/Tk is not available on this platform.]"
+    options="$options --without-tcltk"
+fi
+
+fi                              # !prebuilt
+
+if [ $prebuilt = no ]; then
+
+java_option="--without-java"
+
+if [ x"$has_java_jni" = xyes ]; then
+    install_jasper="${opt_install_jasper:-${install_jasper:-yes}}"
+
+    echo
+    prompt_user "Do you wish to install Jasper (the Java interface)" "${install_jasper}" yes no
+    cache_value install_jasper "${ans}"
+
+    if [ ".$ans." = .yes. ]; then
+
+        : ${prebuilt_jasper:=no}
+	if [ x"$opt_all_questions" = xyes ]; then
+           if [ "xyes" = "xyes" ]; then
+             prompt_user "Do you wish to install the prebuilt Jasper (the Java interface)" "${prebuilt_jasper}" no yes
+             prebuilt_jasper="${ans}"
+             cache_value prebuilt_jasper "${prebuilt_jasper}"
+           fi
+        fi
+
+	if test $sp_darwin != yes || test $opt_all_questions = yes; then # on darwin we should not ask by default
+	    # [PD] 3.10.1 Add explanation of what to enter here.
+	    cat <<EOF
+For the Java interface you should now specify the 'installation path' of
+the Java installation. E.g. if the path to the java compiler is
+/usr/local/jdk/bin/javac, the 'installation path' is probably /usr/local/jdk.
+Note that this is somewhat platform dependent. In case of problems you should
+consult the installation instructions for your Java installation to find out
+what the 'installation path' is.
+EOF
+            prompt_user "Specify JDK installation path, e.g., /usr/jdk1.5.0 (or leave blank)" $java_path
+	    java_path=$ans
+	else                    # sp_darwin = yes
+	    java_path=''
+	    java_option="--with-java"	# [PD] 4.0.5
+	fi
+	cache_value java_path $java_path
+
+        if test $sp_darwin != yes; then
+          # [PM] 3.8.6
+          if [ $opt_all_questions = yes ]; then
+
+            cat <<EOF
+
+NOTE: About Java location.
+
+By default the location of Java is embedded in the SICStus development
+system executable (sicstus) or the jasper foreign resource. This makes
+it possible for library(jasper) to find the Java libraries (e.g.,
+libjvm.so) without setting LD_LIBRARY_PATH. See the release
+notes.
+
+EOF
+
+            prompt_user "Embed JDK paths for library(jasper) (recommended)" $embed_jdk_rpath yes no
+          else
+            embed_jdk_rpath=yes
+          fi
+        else
+          # [PM] 4.2 Mac OS X 10.5 and later does have rpath (@rpath) but we do not use it yet.
+          embed_jdk_rpath=no
+        fi
+	cache_value embed_jdk_rpath $embed_jdk_rpath
+	if [ ".$embed_jdk_rpath." = ".no." ]; then
+	    options="$options --disable-jdk-rpath"
+	fi
+	if [ "x$java_path" != "x" ]; then
+	    java_option="--with-java=$java_path"
+	else
+            # [PM] 4.3 The user answered 'yes' to Java support
+            java_option='--with-java'
+	fi
+    else
+	java_option="--without-java"
+	has_java_jni=no
+    fi
+else				# $has_java_jni != yes
+    echo "[Jasper is not available on this platform.]"
+fi
+
+if [ $opt_all_questions = yes ]; then
+    prompt_user "Do you want to specify the location of Java (for use with Prologbeans)?" "${locate_java}" yes no
+    cache_value locate_java "${ans}"
+    if [ ".$ans." = .yes. ]; then
+	prompt_user "Specify JDK installation path, e.g., /usr/jdk1.5.0 (or leave blank)" $java_path
+	java_path=$ans
+	cache_value java_path $java_path
+	java_option="--with-java=$java_path"
+    else                    # sp_darwin = yes
+	java_option="--without-java"
+    fi
+fi
+
+options="$options $java_option"
+
+fi                              # !prebuilt
+
+if [ $prebuilt = no ]; then
+
+if [ $has_bdb = yes ]; then
+    install_bdb="${opt_install_bdb:-${install_bdb:-yes}}"
+    echo
+    prompt_user "Do you wish to install the Berkeley DB module (library(bdb)). " "${install_bdb}" yes no
+    cache_value install_bdb "${ans}"
+    if [ ".$ans." = .yes. ]; then
+	if [ ".$opt_called_by_GUI." = .yes. ]; then
+	    prompt_user "Specify a libdb shared library for linking, e.g. /usr/local/Berkeley/lib/libdb-4.0.so" $libdb_path
+	    libdb_path=$ans
+	    cache_value libdb_path $libdb_path
+	    if [ "$libdb_path" ]; then
+		options="$options --with-libdb=$libdb_path"
+	    fi
+	else
+	    # [PD] 3.10.1 Add explanation of what to enter here.
+	    cat <<EOF
+For the Berkeley DB interface you should now specify the 'installation path'
+of the Berkeley DB installation. E.g. if the path to the dynamic bdb library
+is /usr/local/BerkeleyDB.x.y/lib/libdb.so, the 'installation path' is
+/usr/local/BerkeleyDB.x.y.
+EOF
+	    prompt_user "Specify path to Berkeley DB. e.g., /usr/local/Berkeley (or leave blank)" $bdb_path
+	    bdb_path=$ans
+	    cache_value bdb_path $bdb_path
+
+	    if [ "$bdb_path" ]; then
+		options="$options --with-bdb=$bdb_path"
+	    fi
+        fi
+    else
+	options="$options --without-bdb"
+	has_bdb=no
+    fi
+else
+    echo "[Berkeley DB is not available on this platform.]"
+    options="$options --without-bdb"
+fi
+
+if [ $has_odbc = yes ]; then
+    install_odbc="${opt_install_odbc:-${install_odbc:-yes}}"
+    # [PM] 4.2 FIXME: We always install a prebuilt odbc foreign
+    # resource. This means that the only thing that can fail is if
+    # configure fails to test-link against odbc but that is not fatal
+    # for the installer, it just means that some part of odbc
+    # development files is unavailable. 
+    # So: We should not ask here and we should only use the configure
+    # result to warn the user, if at all.
+    echo
+    prompt_user "Do you wish to install the ODBC module (library(odbc)). " "${install_odbc}" yes no
+    cache_value install_odbc "${ans}"
+    if [ ".$ans." = .yes. ]; then
+        if false; then # [PM] 4.1.3 --with-odbc is not yet implemented
+          if [ ".$opt_called_by_GUI." = .yes. ]; then
+              prompt_user "Specify a libodbc shared library for linking, e.g. /usr/local/unixODBC/lib/libodbc-1.0.so" $liodbc_path
+              libodbc_path=$ans
+              cache_value libodbc_path $libodbc_path
+              if [ "$libodbc_path" ]; then
+                  options="$options --with-libodbc=$libodbc_path"
+              fi
+          else
+              cat <<EOF
+  For the ODBC interface you should now specify the 'installation path'
+  of the ODBC installation. E.g. if the path to the dynamic odbc library
+  is /usr/local/unixODBC/lib/libodbc.so, the 'installation path' is
+  /usr/local/unixODBC.
+EOF
+              prompt_user "Specify path to ODBC. e.g., /usr/local/unixODBC (or leave blank)" $odbc_path
+              odbc_path=$ans
+              cache_value odbc_path $odbc_path
+
+              if [ "$odbc_path" ]; then
+                  options="$options --with-odbc=$odbc_path"
+              fi
+          fi
+        fi # false
+    else
+	options="$options --without-odbc"
+	has_odbc=no
+    fi
+else
+    echo "[ODBC is not available on this platform.]"
+    options="$options --without-odbc"
+fi
+
+
+# [PD] 3.10.1 Make it possible to do the test installations with the native
+#             C compilers.
+if [ "x$opt_all_questions" = "xyes" ] || [ "x$opt_called_by_GUI" = "xyes" ]; then
+    prompt_user "Specify the path to your C compiler (or leave blank)" $c_compiler
+    c_compiler=$ans
+    cache_value c_compiler $c_compiler
+
+    if [ "$c_compiler" ]; then
+	options="$options --enable-cc=$c_compiler"
+    fi
+fi
+
+fi                              # !prebuilt
+
+do_unpack=yes
+
+if test -d lib && test -d include; then
+  echo
+  printf '%s' "$tarball_or_encrypted_tarball seems to have been unpacked already. "
+  prompt_user "Unpack anyway" no yes no
+  do_unpack=$ans
+fi
+
+if [ $prebuilt = no ]; then
+   will_now_proceed_without_questions_message
+fi                              # !prebuilt
+
+
+# [PM] 3.9.1b4 SPLD_CONFIG_FILE is needed for prebuilt installs too
+# Make configure realize that the installation-dir is not here, but in
+# $installdir.
+# [PM] 3.9b4 make it version specific
+# SPLD_CONFIG_FILE=$installdir/bin/spld.config; export SPLD_CONFIG_FILE
+SPLD_CONFIG_FILE="$installdir"/bin/spconfig-$spver;
+
+# [PD] 3.11.1 PERSISTENT_CONFIGURE_OPTIONS must be added after all the other
+#             options, making sure they will override possible duplicates.
+options="$options $PERSISTENT_CONFIGURE_OPTIONS"
+
+if [ $prebuilt = no ]; then
+  export SPLD_CONFIG_FILE
+
+  echo 
+  printf '%s' "Configuring system. This may take a few minutes... "
+  if $CONFIGURE $options \
+      --cache-file=/dev/null \
+      > $errorlog 2>&1 \
+     && \
+      ./config.status \
+      --file=distrib:distrib.in \
+      >> $errorlog 2>&1 \
+     && \
+      ./config.status \
+      --file=spld.config_tmp:spld.config.in \
+      >> $errorlog 2>&1 \
+    ; then
+    echo "done."
+  else
+    echo
+    echo "Configuration phase failed. Output:"
+    cat $errorlog
+    echo "The file 'config.log' may contain additional information about"
+    echo "what went wrong."
+
+    cat <<EOF
+
+One reason the configure failed may be that the configure script did
+not find a working C compiler. If you have a C compiler (such as gcc)
+in a non-standard place you can define the environment variable CC
+before re-invoking InstallSICStus.
+EOF
+
+    if [ "xyes" = "xyes" ]; then
+	cat <<EOF
+
+If you do not have a C-compiler you may be able to use the pre-built
+version of SICStus. In that case you need to start InstallSICStus with
+the --prebuilt flag, that is, something like:
+  ./InstallSICStus --prebuilt
+EOF
+	if [ "${ask_for_prebuilt:-yes}" = "yes" ]; then
+    cat <<EOF
+
+Alternatively, answer yes when the installer asks whether you want to
+install the prebuilt version.
+EOF
+	else
+    cat <<EOF
+
+Alternatively, you can start InstallSICStus with the --all-questions
+flag, that is, something like:
+  ./InstallSICStus --all-questions
+
+The installer will then prompt you for some additional questions, one
+of which is whether you want to install the pre-built version of
+SICStus.
+EOF
+	fi    
+
+    fi                          # PREBUILT_INSTALL_ENABLED
+    echo "Installation aborted."
+    exit 1
+  fi
+fi                              # !prebuilt
+
+if [ $prebuilt = yes ]; then
+    # [PM] 3.9.1b4 for pre-built installations we do not run
+    # configure. Instead we have pre-substituted versions of all
+    # files.
+
+    rm -f distrib
+    cp prebuilt_distrib ./distrib
+    # [PM] 3.10.2 not: install_file prebuilt_distrib distrib $defmode
+
+fi                              # prebuilt
+
+if [ ! -f ./distrib ]; then
+  echo "Internal error: file 'distrib' does not exist."
+  echo "Installation aborted."
+  exit 1
+fi
+
+. ./distrib
+
+# [PM] 3.9.1b4 patch up things from ./distrib that are install site specific
+if [ $prebuilt = yes ]; then
+
+  # [PM] 4.2 _not_ set in ./distrib
+  SP_ROOTDIR="$installdir"
+
+  ## BEGIN these must match what configure.in does
+
+     # [PM] 4.2 Set in ./distrib if not prebuilt
+     TOP_SRCDIR="`pwd`"
+
+     # [PM] 4.2 Set in ./distrib if not prebuilt
+     SP_BINDIR="$SP_ROOTDIR/bin"
+
+     # [PM] 4.2 Set in ./distrib if not prebuilt
+     SP_ROOTLIBDIR="$SP_ROOTDIR/lib"
+
+     # [PM] 4.2 Set in ./distrib if not prebuilt
+     SP_PATHDIR="$SP_ROOTLIBDIR/$SP_DIRNAME" # SP_DIRNAME is platform specific
+
+     # [PM] 4.2 Set in ./distrib if not prebuilt
+     SP_LIBRARY_DIR="$SP_PATHDIR/library"
+
+     # [PM] 4.2 Set in ./distrib if not prebuilt
+     SP_BINAUXDIR="$SP_PATHDIR/bin"
+
+  ## END these must match what configure.in does
+
+  # [PM] 4.2 GCC_PROG_NAME_LD is gone
+  # GCC_PROG_NAME_LD=""
+
+  echo
+  printf '%s' "Looking for perl.."
+  perl_found=no
+  IFS="${IFS= 	}"; save_ifs="$IFS"; IFS=":"
+  dummy="$PATH"
+  for dir in $dummy; do
+    case $dir in
+      /)                        # root, skip it
+         dir=''
+         ;;
+      /*/)
+         sep=''
+         ;;
+      /*)
+         sep='/'
+         ;;
+      *) # not absolute, skip it
+         dir=''
+         ;;
+    esac
+
+    if test -n "$dir" && test -d $dir; then
+      def_perl="$dir${sep}perl"
+      if [ -f "$def_perl" ]; then
+        if "$def_perl" -e 'print "found perl version $]\n";' -e 'require 5.00404' >> $install_log 2>&1 ; then
+          default_perl="$def_perl"
+          perl_found=yes
+          break;
+        fi                      # recent enough version
+      fi                        # exists
+    fi                          # $dir is non-empty and a dir
+  done
+  IFS="$save_ifs"
+
+  if test $perl_found = no; then
+    for perl_base in perl perl5; do
+      for def_perl in /usr/bin/$perlbase /bin/$perlbase /usr/local/bin/$perlbase /usr/bin/false /bin/false; do
+        if [ -f "$def_perl" ]; then
+          if "$def_perl" -e 'print "found perl version $]\n";' -e 'require 5.00404' >> $install_log 2>&1 ; then
+            default_perl="$def_perl"
+            perl_found=yes
+            # this should be break 2 but [PM] is unsure how common support for "break <levels>" is.
+            break
+          fi
+        fi
+      done
+      if test $perl_found = yes; then
+        break;
+      fi
+    done
+  fi
+
+  if test $perl_found = yes; then
+    echo ".. $default_perl"
+  else
+    default_perl="/usr/bin/perl"
+    echo ".. no suitable default perl found"
+    prompt_user "Specify absolute path to perl (at least 5.004_04). e.g., /usr/bin/perl (or leave blank)" $default_perl
+    default_perl="$ans"
+  fi
+
+  cache_value default_perl "$default_perl"
+  PERL="$default_perl"
+
+  rm -f Common
+  cp prebuilt_Common Common
+  # [PM] 3.10.2 not: install_file prebuilt_Common Common $defmode
+
+  # [PM] 3.9.1 there may be AC_SUBST variables here that should be site specific even for a pre-built install.
+  cp prebuilt_spld.config_tmp spld.config_tmp
+  # [PM] 3.10.2 not: install_file prebuilt_spld.config_tmp spld.config_tmp $defmode
+  
+  # real-ld
+
+  # [PM] 4.2 GCC_PROG_NAME_LD is gone
+  # sed -e "s#""@""GCC_PROG_NAME_LD""@""#$GCC_PROG_NAME_LD#g" -e "s#""@""PERL""@""#$PERL#g" real-ld.in > real-ld
+  # # [PM] 3.10.2 not: install_file real-ld ...
+
+fi                              # prebuilt
+
+# [PM] 4.2 BEGIN now generate manually also when not prebuilt
+
+  # [PM] 3.9.1b4 The strange use of "@" is to protect from patterns like @FOO@ from AC_SUBST
+  sed -e "s#""@""SP_LIBRARY_DIR""@""#$SP_LIBRARY_DIR#g" -e "s#""@""SP_RTSYS_DIRNAME""@""#$SP_RTSYS_DIRNAME#g" -e "s#""@""SP_DIRNAME""@""#$SP_DIRNAME#g" -e "s#""@""LICENSE_PRODUCT""@""#sicstus4.6_linux#g" -e "s#""@""SICSTUS_VERSION_STRING""@""#4.6.0#g" splm.in > splm
+
+  # PERL comes from ./distrib or is manually set if prebuilt
+  sed -e "s#""@""SPLD_CONFIG_FILE""@""#${SPLD_CONFIG_FILE}#g" -e "s#""@""PERL""@""#$PERL#g" spld_prefix.pl.in > spld_prefix.pl 
+  cat spld_prefix.pl spld_suffix.pl > spld.pl
+  # [PM] 3.10.2 not: install_file spld.pl spld.pl $defmode
+  cat spld_prefix.pl splfr_suffix.pl > splfr.pl
+  # [PM] 3.10.2 not: install_file splfr.pl splfr.pl $defmode
+
+# [PM] 4.2 END now generate manually also when not prebuilt
+
+
+# [PM] 3.11.1 Moved to after $PERL is setup and use $PERL instead of perl
+# [PD] 3.10.2 Check for perl bug with utf8 locale
+if [ `$PERL -e 'print chr(255)' | wc -c` -ne 1 ]; then 
+    cat <<EOF
+
+Warning:
+  A bug in perl ($PERL) has been detected.
+  This will prevent full usage of the Application Builder, spld, and
+  the Foreign Resource Linker, splfr. To get around this problem you
+  should set the environment variable LC_ALL to a non-UTF8 value
+  (e.g. \"C\") before installing SICStus, and also whenever running
+  spld or splfr.
+
+EOF
+    ignore_perl_bug=no
+    if [ "x$opt_all_questions" = "xyes" ]; then
+        prompt_user "Ignore the above and install anyway" no yes no
+        ignore_perl_bug=$ans
+    else
+        echo "If you rerun InstallSICStus with the option --all-questions,"
+        echo "you can ignore the perl bug and proceed with the installation."
+    fi
+    if [ "x$ignore_perl_bug" != "xyes" ]; then
+      echo "Installation aborted."
+      exit 1
+    fi
+fi
+
+
+if [ $prebuilt = yes ]; then
+  will_now_proceed_without_questions_message
+fi                              # prebuilt
+
+
+# [PM] 3.9.1b4 also for prebuilt
+# [PM] Remove unsubstituted entries like FOO=@FOO@ and FOO="@FOO@"
+rm -f Common.bkp
+mv Common Common.bkp
+cat Common.bkp | grep -v '=@' | grep -v '="@' > Common
+
+
+# [PD] 3.9.1 Check for correct hardware (all platforms) and correct platform-
+#            version (Linux only).
+
+build_cpu=`echo $BUILD_PLATFORM | sed -e "s/\([^-]*\)-.*/\1/"`
+install_cpu=`echo $INSTALL_PLATFORM | sed -e "s/\([^-]*\)-.*/\1/"`
+# [PM] 3.9.1 Note: this does the right thing also for sparc64 pseudo platform
+if [ "x$build_cpu" != "x$install_cpu" ]; then
+    echo "Install CPU type is not the same as build CPU type."
+    echo "Build CPU type:   $build_cpu"
+    echo "Install CPU type: $install_cpu"
+    ignore_wrong_cpu=no
+    if [ "x$opt_all_questions" = "xyes" ]; then
+	prompt_user "Attempt an installation anyway" no yes no
+	# [PD] 3.10 Remember the answer ...
+	ignore_wrong_cpu=$ans
+    else
+        echo "If you rerun InstallSICStus with the option --all-questions,"
+	echo "you can proceed with the installation despite the mismatch."
+    fi
+    cache_value ignore_wrong_cpu $ignore_wrong_cpu
+    if [ ".$ignore_wrong_cpu." = .no. ]; then 
+	echo "Installation aborted."
+	exit 1
+    else
+	echo "Continuing despite wrong CPU type..."
+    fi
+fi
+
+sysname=`uname | tr [A-Z] [a-z]`
+if [ "x$sysname" = "xlinux" ]; then
+    build_libc_version=`echo $BUILD_PLATFORM | sed -e "s/.*linux-glibc\(.*\)/\1/"`
+    install_libc_version=`echo $INSTALL_PLATFORM | sed -e "s/.*linux-glibc\(.*\)/\1/"`
+    if [ ".$install_libc_version." != ".$build_libc_version." ]; then
+
+        build_libc_major=`echo $build_libc_version | sed -n -e '1s/^\([0-9][0-9]*\)\.\([0-9][0-9]*\)$/\1/p'`
+        build_libc_minor=`echo $build_libc_version | sed -n -e '1s/^\([0-9][0-9]*\)\.\([0-9][0-9]*\)$/\2/p'`
+        install_libc_major=`echo $install_libc_version | sed -n -e '1s/^\([0-9][0-9]*\)\.\([0-9][0-9]*\)$/\1/p'`
+        install_libc_minor=`echo $install_libc_version | sed -n -e '1s/^\([0-9][0-9]*\)\.\([0-9][0-9]*\)$/\2/p'`
+        if [ "${install_libc_major}" -gt "${build_libc_major}" ]; then
+          install_libc_is_older=no
+        elif [ "${install_libc_major}" -eq "${build_libc_major}" ]; then
+          if [ "${install_libc_minor}" -ge "${build_libc_minor}" ]; then
+            install_libc_is_older=no
+          else
+            install_libc_is_older=yes
+          fi
+        else
+          install_libc_is_older=yes
+        fi
+        echo ""
+        echo '***************************************************************'
+        echo 'The Glibc version used when building the installed SICStus     '
+        echo 'differs from that of the install target (your machine).        '
+
+	echo "SICStus was built for Glibc $build_libc_version."
+        if [ "${install_libc_is_older}" = "yes" ]; then
+            echo "This system uses Glibc $install_libc_version, which is older,"
+            echo "and therefore unlikely to work with this version of SICStus."
+        else
+            echo "This system uses Glibc $install_libc_version, which is newer,"
+            echo "and therefore likely to work with this version of SICStus."
+        fi
+	echo " "
+	echo "SICStus is built and distributed for several versions of Glibc."
+	echo "If there is a version of the SICStus installation package"
+	echo "corresponding to the version of Glibc installed on your machine,"
+	echo "you should use that installation package."
+	echo " "
+        echo '***************************************************************'
+
+        if [ "${install_libc_is_older}" = "yes" ]; then
+          : ${ignore_wrong_glibc_version:=no}
+        else
+          : ${ignore_wrong_glibc_version:=yes}
+        fi
+
+
+# [PD] 4.0.3beta1 The Installer Tool may have cached the value of
+#      ignore_wrong_glibc_version, so we have to enter this when called by GUI.
+	if [ "x$opt_all_questions" = "xyes" ] || [ "x$opt_called_by_GUI" = "xyes" ]; then
+	    prompt_user "Attempt an installation anyway" $ignore_wrong_glibc_version yes no
+	    ignore_wrong_glibc_version=$ans
+	else                    # ! opt_all_questions
+            if [ ".$ignore_wrong_glibc_version." = .no. ]; then
+                echo "If you rerun InstallSICStus with the option --all-questions,"
+                echo "you can proceed with the installation despite the mismatch."
+            fi
+	fi
+	cache_value ignore_wrong_glibc_version $ignore_wrong_glibc_version
+	if [ ".$ignore_wrong_glibc_version." = .no. ]; then
+	    echo "Installation aborted."
+	    exit 1
+	else
+	    echo "Continuing despite differing Glibc versions..."
+	fi
+    fi
+fi
+
+# [PM] 3.9.1+ install Terminal.app script (e.g., "SICStus Prolog 3.9.1.term")
+if [ $sp_darwin = yes ]; then
+if [ $install_launcher_script = yes ]; then
+  windowtitle="SICStus Prolog $spver"
+  # [PM] 4.2 added SP_ULIMIT_DATA_SEGMENT_SIZE
+  # [PM] 4.2 Moved SP_CTYPE_STDIO=UTF-8 from macosx_launcher to launchercommand
+  #          Note: I do not think SP_CTYPE_STDIO is needed anymore,
+  #          LC_CTYPE=utf-8 seems to be the default in Mac OS X 10.5.
+  # launch the version specific version!
+  launchercommand="$SP_BINDIR/sicstus-$spver -i -DSP_ULIMIT_DATA_SEGMENT_SIZE=unlimited -DSP_CTYPE_STDIO=UTF-8"
+  rm -f macosx_launcher.term
+  # strange '@' is for protecting from AC_SUBST
+  # use of , instead of / is to protect against / in COMMAND
+  sed -e 's,@''WINDOWTITLE''@'",$windowtitle," -e 's,@''COMMAND''@'",$launchercommand," < macosx_launcher.term.in > macosx_launcher.term
+  # [PM] 4.2 Note: this name is mentioned in relnotex.texi
+  scriptname="SICStus Prolog $spver.term"
+  printf '%s' "Installing launcher script ($scriptname) into Applications folder..."
+  install_file macosx_launcher.term "/Applications/$scriptname" $defmode,a+x
+fi                              # install_launcher_script
+fi                              # sp_darwin
+
+
+if [ $prebuilt = no ]; then
+if test "$has_tcltk" = yes; then 
+    : ${tcltk_path="not specified"}
+    : ${tcltk_version="not specified"}
+    if test x"$TCLTK_MODULE" = x; then
+    cat <<EOF
+
+Failed to locate and/or test-link the Tcl/Tk library module.  Is the
+following information correct?
+
+Path to Tcl/Tk: $tcltk_path
+Tcl/Tk version: $tcltk_version
+
+If not, type 'no' or return to abort installation and then rerun the
+installation program specifying the correct values. 
+
+If they value above are correct, check config.log for additional
+information about what went wrong. 
+
+You may continue the installation by typing 'yes', but Tcl/Tk will not be
+installed.
+
+EOF
+	prompt_user Continue no yes no
+	if [ ".$ans." = .no. ]; then 
+	    echo "Installation aborted."
+	    exit 1
+	else
+	    has_tcltk=no
+	fi
+    fi
+fi
+fi                              # !prebuilt
+
+if [ $prebuilt = no ]; then
+# [PM] 4.2 ignore configure-problems if using prebuilt foreign resource
+if [ x"$prebuilt_jasper" != xyes ]; then
+if test "$has_java_jni" = yes; then
+    : ${java_path="not specified"}
+    if test x"$JASPER_MODULE" = x; then
+	cat <<EOF
+
+Failed to locate and/or test-link the Jasper module. Is the following
+information correct?
+
+Path to the JDK: $java_path
+
+If not, type 'no' or return to abort installation and then rerun the
+installation program specifying the correct values. 
+
+If they value above are correct, check config.log for additional
+information about what went wrong.
+
+You may continue the installation by typing 'yes', but Jasper will not be
+installed.
+
+EOF
+
+	prompt_user Continue no yes no
+	if [ ".$ans." = .no. ]; then 
+	    echo "Installation aborted."
+	    exit 1
+	else
+	    has_java_jni=no
+	fi
+    fi
+fi
+fi                              # !prebuilt_jasper
+fi                              # !prebuilt
+
+if [ $prebuilt = no ]; then
+if test "$has_bdb" = yes; then
+    : ${bdb_path="not specified"}
+    if test -z "$BDB_MODULE"; then
+	cat <<EOF
+
+Failed to locate and/or test-link the Berkeley DB module. Is the following
+information correct?
+
+Path to Berkeley DB: $bdb_path
+
+If not, type 'no' or return to abort installation and then rerun the
+installation program specifying the correct values.
+
+If they value above are correct, check config.log for additional
+information about what went wrong.
+
+You may continue the installation by typing 'yes', but library(bdb) will
+not be installed.
+
+EOF
+
+	prompt_user Continue no yes no
+	if [ ".$ans." = .no. ]; then 
+	    echo "Installation aborted."
+	    exit 1
+	else
+	    has_bdb=no
+	fi
+    fi
+fi
+fi                              # !prebuilt
+
+
+if [ $prebuilt = no ]; then
+if test "$has_odbc" = yes; then
+    : ${odbc_path="not specified"}
+    if test -z "$ODBC_MODULE"; then
+	cat <<EOF
+
+Failed to locate and/or test-link the ODBC module. Is the following
+information correct?
+
+Path to ODBC: ${odbc_path:-default}
+
+If not, type 'no' or return to abort installation and then rerun the
+installation program specifying the correct values.
+
+If they value above are correct, check config.log for additional
+information about what went wrong.
+
+You may continue the installation by typing 'yes', but library(odbc) will
+not be installed.
+
+EOF
+
+	prompt_user Continue no yes no
+	if [ ".$ans." = .no. ]; then 
+	    echo "Installation aborted."
+	    exit 1
+	else
+	    has_odbc=no
+	fi
+    fi
+fi
+fi                              # !prebuilt
+
+
+if [ "x$do_unpack" = xyes ]; then
+    echo
+# [PM] 4.4.1 Encryption is no longer used for installers. SPRM-20098.
+if [ "x${ENCRYPTED_INSTALLER}" = "xyes" ]; then
+      printf '%s' "Decrypting $tarball_or_encrypted_tarball... "
+      # Note: this must be canonical_decryptkey, not decrypt_key since the latter may contain delimiters.
+      if ${SP_INSTALL_DECRYPT} -d "$canonical_decryptkey" < $tarball_or_encrypted_tarball \
+      | ${SP_INSTALL_ZCAT} \
+      > $tarball ; then
+        echo "done."
+      else
+        echo
+        echo "Decrypting $tarball_or_encrypted_tarball failed!"
+        echo "Installation aborted."
+        exit 1
+      fi
+else  # !ENCRYPTED_INSTALLER
+      printf '%s' "Uncompressing $tarball_or_encrypted_tarball... "
+      if ${SP_INSTALL_ZCAT} < $tarball_or_encrypted_tarball > $tarball ; then
+        echo "done."
+      else
+        echo
+        echo "Uncompressing $tarball_or_encrypted_tarball failed!"
+        echo "Installation aborted."
+        exit 1
+      fi
+fi  # !ENCRYPTED_INSTALLER
+
+    if [ ".$opt_verbose." = .yes. ]; then
+	printf '%s' "Unpacking $tarball... "
+        # [PD] 3.10.2
+	if [ "x$USE_PAX" = "xyes" ]; then
+	    pax_v=-v
+	else
+	    tar_v=v
+	fi
+        # # [PM] Darwin 5.5 tar -v writes to stderr, others to stdout
+	# $TAR xvf $tarball 2>&1
+    else
+	printf '%s' "Unpacking $tarball... (please wait) "
+        # [PD] 3.10.2
+	if [ "x$USE_PAX" = "xyes" ]; then
+	    pax_v=
+	else
+	    tar_v=
+	fi
+	# $TAR xf $tarball
+    fi
+    # [PD] 3.10.2
+    if [ "x$USE_PAX" = "xyes" ]; then
+	UNPACK_COMMAND="$PAX -r ${pax_v} -f $tarball"
+    else
+	UNPACK_COMMAND="$STDTAR x${tar_v}f $tarball"
+    fi    
+    # [PM] 3.10 added exit code check
+#    if $TAR x${tar_v}f $tarball 2>&1; then
+    # [PD] 3.10.2
+    if $UNPACK_COMMAND 2>&1; then
+      echo "done."
+    else
+      echo
+      echo "Unpacking $tarball failed!"
+      echo "Installation aborted."
+      exit 1
+    fi
+fi
+
+
+
+if [ $overwrite_install = overwrite ]; then
+    echo
+    echo "Copying files to $installdir. This may take a few minutes... "
+    # Don't use $filelist here, since we want to allow for files
+    # created on-site (Makefile:s, for example).
+    # [PD] 3.9 remove bin from list
+    # for file in `find bin lib include -type f`; do
+    for file in `find lib include -type f`; do
+	install_file $file "$installdir"/$file $defmode
+    done
+
+    if [ "X${SP_BINDIST_TOP_LEVEL_DOC}" = "Xyes" ]; then
+      # [PM] 4.0.5 Silent. This is part of the "Copying files to $installdir ..."
+      # # [PM] 3.10 install the docs from the new (in 3.10) top-level location.
+      # echo "Installing documentation into $installdir/lib/${SP_DIRNAME}" # FIXME: remove this debug echo
+      for file in `find doc -type f`; do
+        install_file $file "$installdir"/lib/${SP_DIRNAME}/$file $defmode
+      done
+    fi                          # SP_BINDIST_TOP_LEVEL_DOC
+fi
+
+
+# [PM] 3.9.1 the following used to be bracketed with [$overwrite_install = overwrite ];
+# but that is no good, surely all files affected by ./configure should
+# be re-installed each time we run configure.
+    
+# if true; then
+    # [PM] 3.9 spld.config_tmp is now generated by configure directly
+    # mv spld.config spld.config_tmp
+
+    # [PM] 3.9b4 now version specific
+    # cat spld.config_tmp | sed -e "s@&prefix&@${installdir}@g" > spld.config
+    cat spld.config_tmp | sed -e "s@&prefix&@${installdir}@g" > spconfig-4.6.0
+    # [PM] 3.10.2 not: install_file spconfig-4.6.0 spconfig-4.6.0 $defmode
+
+    # rm spld.config_tmp
+
+    # [PM] 3.9.1b4 SP_EXPFILE is gone
+    # # [PM] only install sprt.exp on platforms where it is used/exists.
+    # if [ "x" != "x@SP_EXPFILE@" ]; then
+    #    install_file @SP_EXPFILE@ $installdir/bin/sprt-$spver.exp $defmode # [PM] SPRM 1707
+    # fi
+
+    # [PM] 3.9b4 version specific
+    # install_file spld.config $installdir/bin $defmode
+    install_file spconfig-4.6.0 "$installdir"/bin/spconfig-4.6.0 $defmode
+
+    install_file spld.pl "$installdir"/bin/spld $defmode,a+x
+    install_file splfr.pl "$installdir"/bin/splfr $defmode,a+x
+    install_file splm "$installdir"/bin/splm $defmode,a+x
+    install_file spld.pl "$installdir"/bin/spld-$spver $defmode,a+x
+    install_file splfr.pl "$installdir"/bin/splfr-$spver $defmode,a+x
+    install_file splm "$installdir"/bin/splm-$spver $defmode,a+x
+
+    # [PM] 3.9.1 link_foreign_files etc now use $SP_APP_DIR (and would not work anyway with new $opt_exechome initialization).
+    # # Install splfr to $(SP_BINAUXDIR) as well. [Fix for bugs 1390 and 1406 -Jojo]
+    # install_file splfr.pl $SP_BINAUXDIR/splfr $defmode,a+x
+
+    # [PM] 4.1.3+ real-ld is gone
+    # # [PM] 3.9.1 Install real-ld (only needed on IRIX)
+    # if [ "x$SP_NEED_REAL_LD" = "xyes" ]; then
+    #    install_file real-ld $SP_BINAUXDIR/real-ld $defmode,a+x
+    # fi                          # SP_NEED_REAL_LD
+
+    # Update timestamps for .po files so they are considered correctly
+    # up-to-date.
+    find "$installdir"/lib/$SP_DIRNAME/library -name '*.po' -exec touch {} \;
+
+    # Copy 'Common' so it can be found in '..' relative to the Makefile
+    # in .../library.
+    install_file Common "$installdir"/lib/$SP_DIRNAME/Common $defmode
+
+    echo "done."
+# fi
+
+# [PM] 3.9.1 experimenting with SPLD_TOOLFLAGS being --moveable
+echo
+printf '%s' "Creating development system symlinks..."
+(cd $SP_BINDIR; rm -f $SP_RTSYS_DIRNAME; ln -s ../lib $SP_RTSYS_DIRNAME)
+register_uninstall "$SP_BINDIR/$SP_RTSYS_DIRNAME"
+
+# [PM] 4.2 This is to make @loader_path work for libjasper.dylib on Mac OS X
+#          The same trick should be useful on ELF with $ORIGIN
+(cd $SP_ROOTLIBDIR; rm -f $SP_RTSYS_DIRNAME; ln -s . $SP_RTSYS_DIRNAME)
+register_uninstall "$SP_ROOTLIBDIR/$SP_RTSYS_DIRNAME"
+
+echo "done."
+
+: ${SPLD_EXECHOMEFLAGS="--exechome=$SP_BINDIR"} # [PM] 3.11.1 SPRM 7620,.... Avoid automount paths.
+
+if [ x"$prebuilt" = xno ]; then
+  echo
+  printf '%s' "Creating development system binary..."
+  spld=$SP_BINDIR/spld
+  devsys=$SP_BINDIR/sicstus
+  devsys_ver=$SP_BINDIR/sicstus-$spver
+  # (cd $SP_BINDIR; ./spld $SPLD_TOOLFLAGS $SPLD_DSFLAGS -v --main=prolog -o $devsys >> $install_log 2>&1)
+  ${spld} $SPLD_EXECHOMEFLAGS -v $SPLD_TOOLFLAGS $SPLD_DSFLAGS --main=prolog -o $devsys >> $install_log 2>&1
+  # [PM] 3.10.2 SPRM 5479
+  install_file $devsys $devsys $defmode,a+x
+  # (cd $SP_BINDIR; ./spld $SPLD_TOOLFLAGS $SPLD_DSFLAGS -v --main=prolog -o $devsys_ver >> $install_log 2>&1)
+  ${spld} $SPLD_EXECHOMEFLAGS -v $SPLD_TOOLFLAGS $SPLD_DSFLAGS --main=prolog -o $devsys_ver >> $install_log 2>&1
+  install_file $devsys_ver $devsys_ver $defmode,a+x
+fi                              # !prebuilt
+
+if [ x"$prebuilt" = xyes ]; then
+  echo
+  printf '%s' "Installing development system binary..."
+  install_file bin/sicstus "$SP_BINDIR/sicstus" $defmode,a+x
+  install_file bin/sicstus "$SP_BINDIR/sicstus-$spver" $defmode,a+x
+fi                              # prebuilt
+
+if [ -f "$SP_BINDIR/sicstus" ]; then
+    echo "done."
+else
+    echo
+    echo "*Error*: Could not create development system binaries. See $install_log and $errorlog for details."
+    echo "Installation aborted."
+    exit 1
+fi
+
+
+
+
+# [PM] 3.9b5 renamed from SP_LIBDIR to SP_LIBRARY_DIR (the former is
+#      used for something else elsewhere).
+# [PM] 3.9b2 moved this before first use of SP_LIBRARY_DIR.
+if [ ! -d "$SP_LIBRARY_DIR" ]; then
+    echo "Internal error: $SP_LIBRARY_DIR does not exist."
+    echo "Installation aborted."
+    exit 1
+fi
+
+## [PM] 3.9b2 create the _instance_ copies
+echo
+printf '%s' "Creating copies of SICStus run-time for multiple run-time support..."
+if [ ! -f "$SP_ROOTLIBDIR/$RTKERNEL_BASENAME_WITH_DSO_SUFFIX" ]; then
+    echo
+    echo "Internal error: SICStus runtime library ("$SP_ROOTLIBDIR/$RTKERNEL_BASENAME_WITH_DSO_SUFFIX") does not exist."
+    echo "Installation aborted."
+    exit 1
+fi
+
+for indx in 01 02 03 04 05 06; do
+   instance_name=`echo "${RTKERNEL_INSTANCE_TEMPLATE}.${SHSFX}" | sed -n -e "s/XX/${indx}/p"`
+   if [ ${instance_name:-unset} = unset ]; then
+     echo
+     echo "Warning: Could not create name for copy of SICStus run-time. See $install_log and $errorlog for details."
+     break;
+   fi
+   install_file "$SP_ROOTLIBDIR/$RTKERNEL_BASENAME_WITH_DSO_SUFFIX" "$SP_ROOTLIBDIR/${instance_name}" $defmode,a+x
+done
+
+if [ -f "$SP_ROOTLIBDIR/${instance_name:-dummy}" ]; then
+   echo "done."
+else
+   echo
+   echo "Warning: Could not create copy of SICStus run-time. See $install_log and $errorlog for details."
+fi
+
+
+SU_MESSAGES=$SP_LIBRARY_DIR/SU_messages.po
+
+if [ x"$prebuilt" = xno ]; then
+  printf '\nCreating SICStus utilities: '
+  spld=$SP_BINDIR/spld
+
+  printf 'spdet'
+  spdet=$SP_BINDIR/spdet
+  spdet_ver=$SP_BINDIR/spdet-$spver
+  ${spld} $SPLD_EXECHOMEFLAGS -v $SPLD_TOOLFLAGS $SP_LIBRARY_DIR/det.po $SU_MESSAGES -o ${spdet_ver} >> $install_log 2>&1
+  install_file ${spdet_ver} ${spdet_ver} $defmode,a+x
+  install_file ${spdet_ver} ${spdet} $defmode,a+x
+  printf ', '
+
+
+  printf 'spxref'
+  spxref=$SP_BINDIR/spxref
+  spxref_ver=$SP_BINDIR/spxref-$spver
+  ${spld} $SPLD_EXECHOMEFLAGS -v $SPLD_TOOLFLAGS $SP_LIBRARY_DIR/xref.po $SU_MESSAGES -o ${spxref_ver} >> $install_log 2>&1
+  install_file ${spxref_ver} ${spxref_ver} $defmode,a+x
+  install_file ${spxref_ver} ${spxref} $defmode,a+x
+  printf ', '
+
+  printf 'mzn-sicstus'
+  mznsp=$SP_BINDIR/mzn-sicstus
+  mznsp_ver=$SP_BINDIR/mzn-sicstus-$spver
+  ${spld} $SPLD_EXECHOMEFLAGS -v $SPLD_TOOLFLAGS $SP_LIBRARY_DIR/mzn_sicstus.po $SU_MESSAGES -o ${mznsp_ver} >> $install_log 2>&1
+  install_file ${mznsp_ver} ${mznsp_ver} $defmode,a+x
+  install_file ${mznsp_ver} ${mznsp} $defmode,a+x
+  printf ', '
+
+  printf 'spfz'
+  spfz=$SP_BINDIR/spfz
+  spfz_ver=$SP_BINDIR/spfz-$spver
+  ${spld} $SPLD_EXECHOMEFLAGS -v $SPLD_TOOLFLAGS $SP_LIBRARY_DIR/fz.po $SU_MESSAGES -o ${spfz_ver} >> $install_log 2>&1
+  install_file ${spfz_ver} ${spfz_ver} $defmode,a+x
+  install_file ${spfz_ver} ${spfz} $defmode,a+x
+  printf 'done.\n'
+
+
+  # [PM] 4.2 
+  printf '%s' "Creating sprt and sprti..."
+
+  # [PM] 4.2 Will look for embedded saved states and fall back to $SP_APP_DIR/main.sav. See SP_restore().
+  generic_sav='URL:x-sicstus-resource:*.sav'
+
+  sprt=$SP_BINDIR/sprt
+  sprt_ver=$SP_BINDIR/sprt-$spver
+  ${spld} $SPLD_EXECHOMEFLAGS -v $SPLD_TOOLFLAGS --no-embed-sav-file --main=restore $generic_sav -o ${sprt_ver} >> $install_log 2>&1
+  install_file ${sprt_ver} ${sprt_ver} $defmode,a+x
+  install_file ${sprt_ver} ${sprt} $defmode,a+x
+
+  sprti=$SP_BINDIR/sprti
+  sprti_ver=$SP_BINDIR/sprti-$spver
+  ${spld} $SPLD_EXECHOMEFLAGS -v $SPLD_TOOLFLAGS --no-embed-sav-file --main=restore $generic_sav -i -o ${sprti_ver} >> $install_log 2>&1
+  install_file ${sprti_ver} ${sprti_ver} $defmode,a+x
+  install_file ${sprti_ver} ${sprti} $defmode,a+x
+  echo "done."
+fi                              # !prebuilt
+
+if [ x"$prebuilt" = xyes ]; then
+  printf '\nInstalling SICStus utilities: '
+
+  printf 'spdet'
+  install_file bin/spdet "$SP_BINDIR/spdet" $defmode,a+x
+  install_file bin/spdet "$SP_BINDIR/spdet-$spver" $defmode,a+x
+  printf ', spxref'
+  install_file bin/spxref "$SP_BINDIR/spxref" $defmode,a+x
+  install_file bin/spxref "$SP_BINDIR/spxref-$spver" $defmode,a+x
+  printf ', mzn-sicstus'
+  install_file bin/mzn-sicstus "$SP_BINDIR/mzn-sicstus" $defmode,a+x
+  install_file bin/mzn-sicstus "$SP_BINDIR/mzn-sicstus-$spver" $defmode,a+x
+  printf ', spfz'
+  install_file bin/spfz "$SP_BINDIR/spfz" $defmode,a+x
+  install_file bin/spfz "$SP_BINDIR/spfz-$spver" $defmode,a+x
+  printf ' done.\n'
+
+  # [PM] 4.2 
+  printf '%s' "Installing sprt and sprti..."
+  install_file bin/sprt "$SP_BINDIR/sprt" $defmode,a+x
+  install_file bin/sprt "$SP_BINDIR/sprt-$spver" $defmode,a+x
+  install_file bin/sprti "$SP_BINDIR/sprti" $defmode,a+x
+  install_file bin/sprti "$SP_BINDIR/sprti-$spver" $defmode,a+x
+  echo "done."
+fi                              # prebuilt
+
+if [ "x$enable_encrypted_spre" = "xyes" ]; then
+
+if [ "x$spre_decrypt_key" != "none" ] && [ -n "$spre_decrypt_key" ]; then
+
+  printf '%s' "Decrypting Extended Runtime files... "
+
+  spre_crypt="lib/$SP_DIRNAME/bin/spre.ql.crypt"
+  if ${SP_INSTALL_DECRYPT} -d "$canonical_spre_decryptkey" < $spre_crypt \
+  > "${SP_BINAUXDIR}/spre.ql" ; then
+    echo "done."
+  else
+    echo
+    echo "Decrypting $spre_crypt failed (wrong decrypt key? $spre_decrypt_key)!"
+    # forget the broken key
+    spre_decrypt_key='none'
+    cache_value spre_decrypt_key "$spre_decrypt_key"
+    echo "Installation aborted."
+    exit 1
+  fi
+fi                              #  $spre_decrypt_key
+fi # $enable_encrypted_spre
+
+if [ x"$build_sav_dumps" = x"yes" ]; then # [PM] 4.0.5 not true
+if [ x"$prebuilt" = xno ]; then
+  echo
+  printf '%s' "Creating save-dumps..."
+
+  # ( cd $SP_BINDIR; ./sicstus -f -B  >> $install_log 2>&1 || exit 1)
+  dssav="${SP_BINAUXDIR}/spds.sav"
+  if $devsys_ver -f "-B${dssav}" >> $install_log 2>&1 ; then
+    install_file "${dssav}" "${dssav}" $defmode
+  else
+    rm -f "${dssav}"
+    echo
+    echo "*Error*: Could not create run-time system save-dump. See $install_log for details."
+    echo "Installation aborted."
+    exit 1
+  fi
+
+  rtsav="${SP_BINAUXDIR}/sprt.sav"
+  if $devsys_ver -f "-R${rtsav}" >> $install_log 2>&1 ; then
+    install_file "${rtsav}" "${rtsav}" $defmode
+  else
+    rm -f "${rtsav}"
+    echo
+    echo "*Error*: Could not create run-time system save-dump. See $install_log for details."
+    echo "Installation aborted."
+    exit 1
+  fi
+
+  if [ "x$enable_encrypted_spre" = "xyes" ]; then
+    if [ "x$spre_decrypt_key" != "none" ] && [ -n "$spre_decrypt_key" ]; then
+      spresav="${SP_BINAUXDIR}/spre.sav"
+      if $devsys_ver -f "-R${spresav}" >> $install_log 2>&1 ; then
+        install_file "${spresav}" "${spresav}" $defmode
+      else
+        rm -f "${spresav}"
+        echo
+        echo "*Error*: Could not create extended run-time system save-dump. See $install_log for details."
+        echo "Installation aborted."
+        exit 1
+      fi
+    fi                            # $spre_decrypt_key
+  fi                            # $enable_encrypted_spre
+
+  # create spre.sav after decrypting spre.ql, (if decrypting)
+  if [ x"$distribute_spre" = x"yes" ]; then
+    resav="${SP_BINAUXDIR}/spre.sav"
+    if $devsys_ver -f "-R${resav}" >> $install_log 2>&1 ; then
+      install_file "${resav}" "${resav}" $defmode
+    else
+      rm -f "${resav}"
+      echo
+      echo "*Error*: Could not create extended run-time system save-dump. See $install_log for details."
+      echo "Installation aborted."
+      exit 1
+    fi
+  fi # distribute_spre
+
+fi                              # !prebuilt
+fi # build_sav_dumps
+
+if [ x"$prebuilt" = xyes ] || [ x"$build_sav_dumps" != x"yes" ]; then
+  echo
+  printf '%s' "Installing save-dumps..."
+
+  if [ x"$distribute_spre" = x"yes" ]; then
+    spre=spre
+  fi
+  if [ "x$enable_encrypted_spre" = "xyes" ]; then
+    if [ "x$spre_decrypt_key" != "none" ] && [ -n "$spre_decrypt_key" ]; then
+      spre=spre
+    fi                            # $spre_decrypt_key
+  fi                            # $enable_encrypted_spre
+
+  for sav in spds sprt $spre; do
+    install_file lib/sicstus-4.6.0/bin/${sav}.sav $SP_BINAUXDIR/${sav}.sav $defmode
+  done
+fi                              # prebuilt
+
+
+# [PM] 3.9b2 added check
+if [ -f "$SP_BINAUXDIR/sprt.sav" ] && [ -f "$SP_BINAUXDIR/spds.sav" ]; then
+    echo "done."
+else
+    # [PM] 3.10.2 should not happen, install_file should have aborted already
+    echo
+    echo "*Error*: Could not create development and run-time system save-dumps. See $install_log and $errorlog for details."
+    echo "Installation aborted."
+    exit 1
+fi
+
+if [ ".$opt_nolicense." != .yes. ]; then
+    echo
+    printf '%s' "Compiling license file..."
+    # [PM] 4.3 splm -s option uses the default LICENSE_PRODUCT
+    # (cd $SP_BINDIR; ./splm -i "$sitename")
+    # (cd $SP_BINDIR; ./splm -a 'sicstus4.6_linux' "${expires}" "${licensecode}")
+    if (cd $SP_BINDIR; ./splm -s "$sitename" "${licensecode}" "${expires}") >> $install_log 2>&1 ; then
+      :
+    else
+      echo
+      echo "*Error*: Could not create licence file. See $install_log and $errorlog for details."
+      echo "Installation aborted."
+      exit 1
+    fi
+fi
+register_uninstall $SP_LIBRARY_DIR/license.pl
+echo "done."
+
+SPLD="$SP_BINDIR/spld"
+SPLFR="$SP_BINDIR/splfr"
+
+if [ x"$prebuilt" = xno ]; then
+################### Tcl/Tk ##########################################
+pathpush=`pwd`; cd $SP_LIBRARY_DIR
+if [ x"$has_tcltk" = xyes ]; then
+    echo 
+    echo "Performing final link step for Tcl/Tk module..."
+    tcltk_ok=yes
+    tcltk_objs_d=`find $BUILD_PLATFORM/tcltk -name '*_d.o'`
+    tcltk_objs_s=`find $BUILD_PLATFORM/tcltk -name '*_s.o'`
+    tcltk_src=`find . -name tcltk.pl`
+    if  test ".$tcltk_objs_d." = .. || \
+	test ".$tcltk_objs_s." = .. || \
+	test ".$tcltk_src." = ..; then
+	cat <<EOF
+    Error: Missing files for the Tcl/Tk module. Found the following files:
+	Object files for dynamic linking: 
+$tcltk_objs_d
+	Object files for static linking: 
+$tcltk_objs_d
+	Prolog sources: 
+$tcltk_src
+
+    library(tcltk) will not be installed.
+EOF
+	tcltk_ok=no
+    fi
+    
+    # Massage compiler/linker flags for Tcl/Tk.
+    tclinc="`echo $TCLINC | sed -e 's/\([^ ][^ ]*\)/--cflag=\1 /g'`"
+    
+    if [ x"$tcltk_ok" = xyes ]; then
+	# Save away original versions of libraries, unless they're already
+	# there.
+	for sfx in $FLI_SHSFX $STSFX; do
+	    if [ -f $BUILD_PLATFORM/tcltk.$sfx ] && [ ! -f $BUILD_PLATFORM/tcltk.$sfx.orig ]; then
+                install_file $BUILD_PLATFORM/tcltk.$sfx $BUILD_PLATFORM/tcltk.$sfx.orig $defmode
+	    fi
+	done
+	
+	printf '%s' "Linking tcltk.$FLI_SHSFX... "
+	splfr_cmd="$SPLFR -v $tcltk_src $tcltk_objs_d $TCLLIB $tclinc -o $BUILD_PLATFORM/tcltk.$FLI_SHSFX"
+	echo $splfr_cmd >> $install_log 2>&1
+	eval $splfr_cmd >> $install_log 2>&1
+	if [ ! -f "$BUILD_PLATFORM/tcltk.$FLI_SHSFX" ]; then
+	    cat <<EOF
+	    
+Warning: Could not create shared library(tcltk). See $install_log and $errorlog for details.
+EOF
+	else
+	    echo "ok."
+            install_file $BUILD_PLATFORM/tcltk.$FLI_SHSFX $BUILD_PLATFORM/tcltk.$FLI_SHSFX $defmode,a+x
+	fi
+
+	printf '%s' "Linking tcltk.$STSFX... "
+	splfr_cmd="$SPLFR -v --static $tcltk_src $tcltk_objs_s $TCLLIB $tclinc -o $BUILD_PLATFORM/tcltk.$STSFX"
+	echo $splfr_cmd >> $install_log 2>&1
+	eval $splfr_cmd >> $install_log 2>&1
+	if [ ! -f "$BUILD_PLATFORM/tcltk.$STSFX" ]; then
+	    cat <<EOF
+
+Warning: Could not create static library(tcltk). See $install_log and $errorlog for details.
+EOF
+	else
+            install_file $BUILD_PLATFORM/tcltk.$STSFX $BUILD_PLATFORM/tcltk.$STSFX $defmode
+	    echo "ok."
+	fi
+    fi
+fi
+cd $pathpush
+fi                              # !prebuilt
+
+if [ x"$prebuilt" = xno ]; then
+if [ x"$prebuilt_jasper" != xyes ]; then
+################### Java (jasper/spnative) ##########################################
+pathpush=`pwd`; cd $SP_LIBRARY_DIR
+if [ x"$has_java_jni" = xyes ]; then
+    echo 
+    echo "Performing final link step for the Jasper module..."
+    jasper_ok=yes
+
+    jasper_objs_d=`find $BUILD_PLATFORM/jasper -name '*_d.o'`
+    jasper_objs_s=`find $BUILD_PLATFORM/jasper -name '*_s.o'`
+    jasper_src=`find . -name jasper.pl`
+    if  test ".$jasper_objs_d." = .. || \
+	test ".$jasper_objs_s." = .. || \
+	test ".$jasper_src." = ..; then
+	cat <<EOF
+    Error: Missing files for the Jasper module. Found the following files:
+	Object files for dynamic linking: 
+$jasper_objs_d
+	Object files for static linking: 
+$jasper_objs_s
+	Prolog sources: 
+ $jasper_src
+
+    Jasper will not be installed. 
+EOF
+	jasper_ok=no
+    fi
+    
+    javainc="`echo $JAVAINC | sed -e 's/\([^ ][^ ]*\)/--cflag=\1 /g'`"
+    
+
+    # [PM] NOTE: the flags to splfr need to match those used in
+    #            library/Makefile. In particular --multi-sp-aware (SPRM 2508).
+    # [PD] 3.9beta1, Don't build libjasper.so; build jasper.so.
+    if [ x"$jasper_ok" = xyes ]; then
+
+
+        # [PM] 3.9b2 look in the $BUILD_PLATFORM, not in working dir
+	# Save away original versions of libraries, unless they're already
+	# there.
+	for sfx in $FLI_SHSFX $STSFX; do
+           if [ -f $BUILD_PLATFORM/jasper.$sfx ] && [ ! -f $BUILD_PLATFORM/jasper.$sfx.orig ]; then
+               install_file $BUILD_PLATFORM/jasper.$sfx $BUILD_PLATFORM/jasper.$sfx.orig $defmode
+           fi
+        done
+
+	printf '%s' "Linking jasper.$FLI_SHSFX... "
+        # [PM] 3.8.6 --no-rpath is optional, goes in JASPER_SPLFR_FLAGS, also see library/Makefile
+        # [PM] 3.9beta1 --multi-sp-aware see library/Makefile (SPRM 2508)
+        #               --multi-sp-aware is not optional since it ensures
+        #               that SP_MULTI_AWARE has the same value in the
+        #               generated glue code as it has in the already compiled
+        #               jasper_d.o
+	splfr_cmd="$SPLFR -v $JASPER_SPLFR_FLAGS --multi-sp-aware --resource=jasper $jasper_src $jasper_objs_d $JAVALIB $javainc -o $BUILD_PLATFORM/jasper.$FLI_SHSFX"
+	echo $splfr_cmd >> $install_log 2>&1
+	eval $splfr_cmd >> $install_log 2>&1
+	if [ ! -f "$BUILD_PLATFORM/jasper.$FLI_SHSFX" ]; then
+	    cat <<EOF
+	    
+Warning: Could not create shared library(jasper). See $install_log and $errorlog for details.
+EOF
+	else
+	    echo "ok."
+	fi
+        install_file "$BUILD_PLATFORM/jasper.$FLI_SHSFX" "$BUILD_PLATFORM/jasper.$FLI_SHSFX" $defmode,a+x
+
+
+        # [PM] 3.9b5 does not really make sense, we cannot use a static jasper anyway (at present).
+        printf '%s' "Linking jasper.$STSFX... "
+        # [PM] 3.8.6 --no-rpath see library/Makefile ([PM] 3.9 ??
+        #            rpath does not make sense with --static??)
+        # [PM] 3.9beta1 --multi-sp-aware see library/Makefile (SPRM 2508)
+        #               --multi-sp-aware is not optional, see above.
+        splfr_cmd="$SPLFR -v --no-rpath --static --multi-sp-aware $jasper_src $jasper_objs_s $JAVALIB $javainc -o $BUILD_PLATFORM/jasper.$STSFX"
+        echo $splfr_cmd >> $install_log 2>&1
+        eval $splfr_cmd >> $install_log 2>&1
+        if [ ! -f "$BUILD_PLATFORM/jasper.$STSFX" ]; then
+                    echo "Warning: Could not create static library(jasper). See $install_log and $errorlog for details."
+        	else
+        	    echo "ok."
+        	fi
+        install_file "$BUILD_PLATFORM/jasper.$STSFX" "$BUILD_PLATFORM/jasper.$STSFX" $defmode
+
+	# [MC] 3.9, attempting a patch
+	printf '%s' "Creating libspnative.so... "
+
+        # replace spaces with comma (so " -I/jdk/include/i386   -I/jdk/include" can be passed as --cflag=-I/jdk/include/i386,-I/jdk/include
+	# [PD] 3.9 add g option to sed script (replace all spaces).
+        javainc_cflags=`echo "$JAVAINC" | sed -e 's/  */,/g'`
+	spld_cmd="$SPLD $SPLD_EXECHOMEFLAGS -v --jnilib -multi-sp-aware $installdir/lib/$SP_DIRNAME/library/jasper/spnative.c --output $SP_ROOTLIBDIR/libspnative.$JNI_SHSFX --cflag=$javainc_cflags"
+	echo $spld_cmd >> $install_log 2>&1
+	eval $spld_cmd >> $install_log 2>&1
+	if [ ! -f "$SP_ROOTLIBDIR/libspnative.$JNI_SHSFX" ]; then
+	    cat <<EOF
+	    
+Warning: Could not create libspnative.so. See $install_log and $errorlog for details.
+EOF
+	else
+	    echo "ok."
+	fi
+        install_file "$SP_ROOTLIBDIR/libspnative.$JNI_SHSFX" "$SP_ROOTLIBDIR/libspnative.$JNI_SHSFX" $defmode,a+x
+    fi
+fi
+cd $pathpush
+fi                              # !prebuilt_jasper
+fi                              # !prebuilt
+
+if [ x"$prebuilt" = xno ]; then
+################### Berkeley DB (BDB) ##########################################
+pathpush="`pwd`"; cd "$SP_LIBRARY_DIR"
+if [ x"$has_bdb" = xyes ]; then
+    echo 
+    echo "Performing final link step for Berkeley DB module..."
+    bdb_ok=yes
+
+
+    bdb_objs_d="`find $BUILD_PLATFORM/bdb -name '*_d.o'`"
+    bdb_objs_s="`find $BUILD_PLATFORM/bdb -name '*_s.o'`"
+    bdb_src="`find . -name bdb.pl`"
+    if test ".$bdb_objs_d." = .. || test ".$bdb_objs_s." = .. || test ".$bdb_src." = ..; then
+	cat <<EOF
+    Error: Missing files for the bdb module (Berkeley DB). Found the following files:
+	Object files for dynamic linking: 
+$bdb_objs_d
+	Object files for static linking: 
+$bdb_objs_d
+	Prolog sources: 
+$bdb_src
+
+    library(bdb) will not be installed.
+EOF
+	bdb_ok=no
+    fi
+    
+    # Massage compiler/linker flags for BDB.
+    bdbinc="`echo $BDBINC | sed -e 's/\([^ ][^ ]*\)/--cflag=\1 /g'`"
+    
+    if [ x"$bdb_ok" = xyes ]; then
+	# Save away original versions of libraries, unless they're already
+	# there.
+	for sfx in $FLI_SHSFX $STSFX; do
+	    if [ -f $BUILD_PLATFORM/bdb.$sfx ] && [ ! -f $BUILD_PLATFORM/bdb.$sfx.orig ]; then
+                install_file $BUILD_PLATFORM/bdb.$sfx $BUILD_PLATFORM/bdb.$sfx.orig $defmode
+	    fi
+	done
+	
+	printf '%s' "Linking bdb.$FLI_SHSFX... "
+	splfr_cmd="$SPLFR -v $bdb_src $bdb_objs_d $BDBLIB $bdbinc -o $BUILD_PLATFORM/bdb.$FLI_SHSFX"
+	echo $splfr_cmd >> $install_log 2>&1
+	eval $splfr_cmd >> $install_log 2>&1
+	if [ ! -f "$BUILD_PLATFORM/bdb.$FLI_SHSFX" ]; then
+	    cat <<EOF
+	    
+Warning: Could not create shared library(bdb). See $install_log and $errorlog for details.
+EOF
+	else
+	    echo "ok."
+	fi
+        install_file "$BUILD_PLATFORM/bdb.$FLI_SHSFX" "$BUILD_PLATFORM/bdb.$FLI_SHSFX" $defmode,a+x
+
+	printf '%s' "Linking bdb.$STSFX... "
+	splfr_cmd="$SPLFR -v --static $bdb_src $bdb_objs_s $BDBLIB $bdbinc -o $BUILD_PLATFORM/bdb.$STSFX"
+	echo $splfr_cmd >> $install_log 2>&1
+	eval $splfr_cmd >> $install_log 2>&1
+	if [ ! -f "$BUILD_PLATFORM/bdb.$STSFX" ]; then
+	    cat <<EOF
+
+Warning: Could not create static library(bdb). See $install_log and $errorlog for details.
+EOF
+	else
+	    echo "ok."
+	fi
+        install_file "$BUILD_PLATFORM/bdb.$STSFX" "$BUILD_PLATFORM/bdb.$STSFX" $defmode,a+x
+    fi
+fi
+cd $pathpush
+fi                              # !prebuilt
+
+###################################################################################
+
+echo 
+printf '%s' "Completing uninstall info..."
+finish_uninstall
+if [ $uninstall_script != /dev/null ]; then
+    chmod +x $uninstall_script
+    cat >>$uninstall_script <<EOF
+echo "Done."
+EOF
+fi
+echo "done."
+
+echo
+printf '%s' "Cleaning up... "
+for file in *tmp; do
+    if [ -f "$file" ]; then
+        case $file in
+         *.config_tmp)          # [PM] 3.9.1 precious
+         ;;
+         *)
+          echo "Deleting $file"
+          rm -f "$file"
+         ;;
+        esac
+    fi
+done
+
+echo "done."
+
+scan_error_log warnings
+
+cat <<EOF
+
+Installation complete.
+
+The SICStus development system has been installed as:
+   $SP_BINDIR/sicstus
+
+The documentation can be accessed locally by opening the URL:
+
+   file:$SP_PATHDIR/doc/html/
+
+or on the SICStus website:
+
+   https://sicstus.sics.se/docs/
+
+Uninstall by running `pwd`/UnInstallSICStus
+EOF
+exit 0

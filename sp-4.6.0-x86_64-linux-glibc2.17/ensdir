@@ -1,0 +1,121 @@
+#! /bin/sh
+# Copyright (C) 2003 Swedish Institute of Computer Science.
+
+# This script implements 'mkdir -p' in terms of plain mkdir. The
+# primary reason, nowadays, is to record any created directories in
+# the log, for UnInstallSICStus.
+
+# [PM] 4.2.2 rewritten to better handle spaces in the create pathnames.
+# [PM] 3.10.2 optional second argument is file to add created directories to (for UnInstallSICStus).
+#             optional third argument is protection for created directories
+# 990321: Now accepts all types of paths. --Jojo
+# 990321: Optimized for the case when the directory exists.
+
+dir="$1"
+dirlog="$2"
+dirmode="$3"
+
+# [PM] 4.2.2 Not clear that this is necessary but was always done
+if [ -z "$dir" ]; then
+    exit 0
+fi
+
+# Don't do anything if directory exists.
+if [ -d "$dir" ]; then
+    exit 0
+fi
+
+
+path=''
+case "$dir" in
+  /*)
+  path="/"
+  dir="`echo "$dir" | sed -e 's,^//*,,'`"
+  ;;
+esac
+
+# invariant: path is either absolute or relative working directory.
+
+remaining="$dir"
+while [ -n "$remaining" ]; do
+
+  # invariant: remaining does not start with /.
+  # invariant: path exists
+
+  # create path / first-filename-of(remaining)
+
+   name="`echo       "$remaining" | sed -e 's,^\([^/][^/]*\)/*\(.*\),\\1,'`"
+   remaining="`echo  "$remaining" | sed -e 's,^\([^/][^/]*\)/*\(.*\),\\2,'`"
+   path="$path$name/"
+
+   if [ ! -d "$path" ]; then 
+       # [PM] 4.2.2 FIXME: Could pass -m "$dirmode" instead (but
+       # verify that all relevant systems support it)
+       mkdir "$path" || exit $?
+       if [ -n "$dirmode" ]; then
+         chmod "$dirmode" "$path"
+       fi
+       if [ -n "$dirlog" ]; then
+          # [PM] 4.2.2 must work for spaces in path, also on systems
+          # where the default shell can not use $(...) (true for at
+          # least up to Solaris 10)
+          ( cd "$path"; pwd ) >> "$dirlog"
+       fi
+   fi
+done
+
+exit 0
+
+# [PM] 4.2.2 the old code. Did not handle spaces in pathnames.
+
+#! /bin/sh
+# Copyright (C) 2003 Swedish Institute of Computer Science.
+
+# This script implements 'mkdir -p' in terms of mkdir plain in order
+# to overcome absence of -p and different behavior on various
+# platforms. 
+
+# [PM] 3.10.2 optional second argument is file to add created directories to (for UnInstallSICStus).
+#             optional third argument is protection for created directories
+# 990321: Now accepts all types of paths. --Jojo
+# 990321: Optimized for the case when the directory exists.
+
+path=
+if [ -z $1 ]; then
+    exit 0
+fi
+
+dirlog="$2"
+dirmode="$3"
+
+# Don't do anything if directory exists.
+if [ -d $1 ]; then
+    exit 0
+fi
+
+pathsep=`echo $1 | sed -e 's,/, ,g'`
+
+case $1 in 
+    /*) 
+	pathsep="/ $pathsep"
+	;;
+esac
+
+for dir in $pathsep
+do
+    if [ $dir = / ]; then
+	path=/
+    else
+	path=$path$dir/
+    fi
+    if [ ! -d $path ]; then 
+	mkdir $path || exit $?
+        if [ ! -z "$dirmode" ]; then
+          chmod $dirmode $path
+        fi
+        if [ ! -z "$dirlog" ]; then
+           pathabs=`( cd "$path" && pwd )`
+           echo "$pathabs" >> $dirlog
+        fi
+    fi
+done
