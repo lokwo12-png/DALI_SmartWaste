@@ -1,0 +1,18 @@
+#! /bin/sh
+exec sicstus-4.6.0 -r "$0" -a "$@"
+# META_INFO 1
+# FILE: "/tmp/octopussy-vm-centos-7-2-build-20200406-092210/srcdir/library/zinc.po"
+# FR: "random"
+# FR: "codesio"
+# FR: "clpfd"
+# META_INFO END
+version=5 archmask=0x2805b
+xœÝš]lUÇgÛJKýh})ð°%DDZZ1I\ƒ©
+ñ#AdYºÓÍÀvwÜ°$Ú­/Š6¶`d	&Vx)õÁR_Š¾1¦Á˜Ô‚†´••S>"TkgïùßÝ{ÜKwgûä}9™9g÷ž{îÌ´†!ÆæJ!—Ðu9ÉFŸ¡ûÒŽF»Ë0¦š^oväÍáç3rU<°Ï4<dÕÒðkÆ
+Ôtßç¿‚ÄØòDkæÚî9µòŸyy7ãlüøÂZGž¤ûGéú»·(«À}\clò—Þ°"mÒ9{S:sÐv—ÎãÖ98 a¼FÜ3¯3÷Ÿý°U¹Æ:0¿Reþ Õ^ú3ãúìo®sì¿Ú·õ¢'57÷T¸Æz¶i”!CG›œ›Xœ€§ŒÚÕ¥pž}žœ_!`ÓI¯b¿‚$&~åFc®s°ãÃ¯©ïBçi·Âf\Ò¶«¿†×µT?|©oý‘&ÔÓ:;,õij—}a¼D,iÕÌòXJ?¥€ƒž¢:#7uuŒ³’®ÌƒÅ¦Ùª+Ÿõ_®ªµA-ÆÉ7Í Œ¸}ñJcnÑ$e¨‡‹ëÅ&ú®OÅ U1Ž.ÿjßo¾]U3>‚ÄÇc†ê´æÉ°rüÁï!Ñ|–y'Xè‚>¹IH×Añö†¢°zêÝ¾æÜ Ó$Á©b]Ð§+v´¹{©©Ü©q¢›æÑuÄdÜôwDƒÉ°)‘ý›…¬r‰[»cX§ä§|Ýã’çtŒæöp ‘9Š0Æï²Ò%•9=¶¤4\<šŒµeq½Yá´b’=%$J ¬H–k…ÔüB §	I˜ÿ‘Ò²š0c~;·V4"©!¢Ö¹¤®Š'bf Œæ„ýVhsz†5‡)ÚÎÈÝ÷øý²Csj¥k±?SÕm®”ÜÛé>Òý¤”7xÝ¤?ÆìP·XÇ éÏ2;$Ši‚ôW˜j¼YÒW2;¤¿ŽâD‰+ûè^qù7ýn9I]³ýCÈ’šD‡±2Mb±²nßu¤y1³/ÿoY¿tŸ¸†,'½.ëhaÞÐ7y•³‡ÝË{[•Óôý‡UŒ£}T^½³ Óôf™º>^…4®
+›%ÉO‘\ê’Ô~ â&;l	°¦ 4#	«Ý2s—çB°Îs’_9öµ¶Tªhç’Ûµ«îÞc¶%¬}ÙÕ¾MTÝ3TAÔdÂN&$²wÒ?†eiò‡Ùb€±dDMSÿ"Ô”eY lu	Øx4œ“¡¡óÞ‘·JGJt_RçŸ%Íìíh‰©êÈ—ª±Eˆ€U—:^bå;ÔDÔ?Ÿ0™l´âB_ÁoÑœòœZµ3r„zÒãHïAºæ¯ât”zp”¾H÷$ÀUÑë=hØôÜb$yBc‡£Oß2»³»@ò³‹²y=t6-ó¨vû™ÝÒodv]ÌîÒïav¼éu’þ0³ëevÇIÿ%³K3»s¤ÿEc‡õ]%}u™j×Ïxõ¤XcÞÒ¿ÊìÏ"ý[Ìnˆñ‘þSòûé`v#Œ7Mú¿4và-¥}±²\µe~<DúVæÝNú³c¼nÒÓØ7Hú³ÌnœÙMû’Û-ôb0Òª®O~¤g¼ôÓâë)ÆÌg×3´°˜4Ûçß"¡ì‡³Áß•g4…œ¸þÜKÊ×a´(ï;•§NptOžË·ÿ†SÍ8¼eÖ¨‘‘ƒ83.«ï¦ðgãmc-RòwTŠù^³SÆºågõ#¥`§dL´ßË(&UŒ£‹uCOa±§Ð7B/IÄÚÛÃbMþà÷º7™ÐuñúË#pmqðR°a‡ßóýäÕ<œTÑû‚øØ
+}È%Çû“Ê‰ºôËw"­pö»äÌôQ8].9ŸR9â¸LÅrúŽ«~õºäØ=(œ´KÎ™®Ãy8ÅÇÇN©œ~—ëñvçã¿ž]j¾\®Ç÷žç!—ëi™Kçá¿¿¦gÄåzúŒ£y8Å¯ÇçQ9£.ã¼ëf_Nñ~ÕÞR9cn÷E^Ž‹}1«rÆ]r¦Â7ÿË)<_8qçÓiø[à_ÈÁ“çèûèÛè»è›²ïQß’}‡úö=ö-ööêu‹ºCÝ ï2owÄïÉ&‹ýOƒÉùæ
+# META_INFO_SUFFIX 1
+# size="0x75a"
+# file="/tmp/octopussy-vm-centos-7-2-build-20200406-092210/srcdir/library/zinc.po"
+# META_INFO_SUFFIX END
