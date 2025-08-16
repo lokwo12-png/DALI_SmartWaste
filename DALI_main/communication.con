@@ -1,0 +1,17 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Auto-generated Communication Configuration
+% Smart Waste Management MAS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+linda_address('localhost', 44000).
+
+agent(smartbin1, 'localhost', 44000).
+agent(smartbin2, 'localhost', 44000).
+agent(smartbin3, 'localhost', 44000).
+
+agent(controlcenter1, 'localhost', 44000).
+
+agent(truck1, 'localhost', 44000).
+agent(truck2, 'localhost', 44000).
+
+agent(logger1, 'localhost', 44000).

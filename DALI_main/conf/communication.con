@@ -1,0 +1,24 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Communication Configuration for Smart Waste MAS
+% Defines agent communication with Linda server
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% -------------------------------------------------------------------
+% Linda Server (default host/port can be customized if needed)
+% -------------------------------------------------------------------
+linda_address('localhost', 44000).
+
+% -------------------------------------------------------------------
+% Agents participating in the MAS
+% -------------------------------------------------------------------
+
+agent(smartbin1, 'localhost', 44000).
+agent(smartbin2, 'localhost', 44000).
+agent(smartbin3, 'localhost', 44000).
+
+agent(controlcenter1, 'localhost', 44000).
+
+agent(truck1, 'localhost', 44000).
+agent(truck2, 'localhost', 44000).
+
+agent(logger1, 'localhost', 44000).
